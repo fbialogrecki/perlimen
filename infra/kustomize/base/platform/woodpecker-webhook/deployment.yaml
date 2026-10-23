@@ -31,7 +31,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: proxy
-          image: docker.io/nginxinc/nginx-unprivileged:1.30.5-alpine-slim@sha256:bfcf1250dae73fb5dafe18b9fa64d033441510c5a2fc7a11cf8003087890301b
+          image: docker.io/nginxinc/nginx-unprivileged:1.30.6-alpine-slim@sha256:5d8bb9437d74a600ec5dbf90c035451c724dc33eac8d3a71078f6f8612c345f6
           command: [nginx]
           args: [-g, "daemon off;"]
           securityContext:
