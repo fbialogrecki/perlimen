@@ -1,13 +1,13 @@
 # syntax=docker/dockerfile:1
 
 # Readable Bun 1 slim tag retained; digest pins the multi-arch index.
-FROM docker.io/oven/bun:1.4-slim@sha256:4c3ac64f41e0a47e28403789a63ecdca7987f322fa811bf5b3cb0f25f18443cc AS deps
+FROM docker.io/oven/bun:1.4.4-slim@sha256:1846adf22496bd711036aae8be147e57bdebbaea2e5264e3e0b5af1db187d9a4 AS deps
 WORKDIR /app
 
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile
 
-FROM docker.io/oven/bun:1.4-slim@sha256:4c3ac64f41e0a47e28403789a63ecdca7987f322fa811bf5b3cb0f25f18443cc AS builder
+FROM docker.io/oven/bun:1.4.4-slim@sha256:1846adf22496bd711036aae8be147e57bdebbaea2e5264e3e0b5af1db187d9a4 AS builder
 WORKDIR /app
 
 ENV NEXT_TELEMETRY_DISABLED=1
@@ -16,7 +16,7 @@ COPY . .
 RUN bun --bun next build
 RUN bun -e 'const routes = require("./.next/server/app-paths-manifest.json"); for (const route of ["/api/reports/route", "/api/social/reports/route", "/api/social/moderation/reports/route", "/api/social/moderation/reports/[id]/route"]) { if (!routes[route]) throw new Error(`Missing report API: ${route}`); }'
 
-FROM docker.io/oven/bun:1.4-slim@sha256:4c3ac64f41e0a47e28403789a63ecdca7987f322fa811bf5b3cb0f25f18443cc AS runner
+FROM docker.io/oven/bun:1.4.4-slim@sha256:1846adf22496bd711036aae8be147e57bdebbaea2e5264e3e0b5af1db187d9a4 AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production \
