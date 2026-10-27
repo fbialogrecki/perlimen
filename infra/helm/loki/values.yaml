@@ -56,6 +56,9 @@ singleBinary:
     enabled: true
     storageClass: local-path
     size: 30Gi
+    # Chart default is Delete: scaling to 0 (k3s-hibernate) wiped all logs (filesystem store).
+    whenScaled: Retain
+    whenDeleted: Retain
 
 read:
   replicas: 0
