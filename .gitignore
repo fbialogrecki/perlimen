@@ -12,6 +12,7 @@ graphify-out/
 # Markdown is opt-in so agent notes and evidence files stay out of git.
 *.[mM][dD]
 !/AGENTS.md
+!/PROJECT_SPECIFICATION.md
 !/README.md
 !/SECURITY.md
 !/docs/**/*.md

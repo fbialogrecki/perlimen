@@ -4,10 +4,39 @@ Perlimen is a social and event-discovery platform for the music scene. The MVP p
 
 This file is the active project briefing for coding agents: product scope, architecture rules, and implementation guidance. Keep it concise and update it in the same change that alters a convention.
 
+## Required task startup and skills
+
+- At the start of every new task, before analysis, planning, or edits, read
+  `PROJECT_SPECIFICATION.md`: start with its section map and then the relevant
+  sections, following this repository's specification-reading rules below.
+- Always load the `graphify` skill and read the existing `graphify-out/graph.json`
+  at task startup, including for simple tasks. Inspect its structure and retrieve
+  task-relevant nodes and relationships; checking that the file exists is not
+  enough. Verify implementation decisions against current source files.
+- Automatic `graphify` use is strictly read-only. Never create, rebuild, update,
+  repair, cluster, export, or write graph files, sidecars, memories, or reflections
+  without an explicit user request for that operation. A missing or stale graph,
+  a coding request, or merely invoking the skill does not authorize graph writes.
+  Do not install tools or start watchers/hooks as part of automatic graph reading.
+  If a query command writes files or needs setup, traverse the JSON in memory.
+  These restrictions override the skill's default build/update/write workflow.
+- Before coding begins, including later in a conversation, automatically load
+  `ponytail` and apply its default `full` level unless the user selects another
+  level or opts out. Do not activate it for prose-only tasks.
+- These are explicit exceptions to any general manual-only skill policy:
+  `graphify` for required read-only startup and `ponytail` before coding.
+  Other skills require explicit user invocation. Resolve skills from the current
+  skill catalog; on this workstation they live under `~/.agents/skills/`.
+- If the specification, graph, or a required skill is missing or unreadable,
+  briefly report it and continue with available sources where possible. Do not
+  claim it was read or automatically create, install, or update it.
+- Reuse context already read in this task while files remain unchanged; do not
+  repeat startup on every follow-up message.
+
 ## How To Use This File
 
 - Treat `AGENTS.md` like code: keep it current and under 20k characters. Prefer exact commands over prose.
-- Put durable project guidance here. How the system fits together is described in `docs/architecture.md`; when a technical choice changes, update that description in the same PR. Scratch implementation notes go in `docs/plans/`, which git ignores.
+- Put durable working rules here. Shipped behavior is described in `PROJECT_SPECIFICATION.md` and the platform in `docs/architecture.md`; when a technical choice changes, update them in the same PR. Scratch implementation notes go in `docs/plans/`, which git ignores.
 - The nearest nested `AGENTS.md` also applies. For `apps/web`, read `apps/web/AGENTS.md` before touching Next.js code.
 
 ## Repository Shape
@@ -23,17 +52,31 @@ libs/py/                  Shared Python helpers
 infra/                    Kustomize, Helm values, ArgoCD app-of-apps (ArgoCD tracks main)
 ops/                      Operator scripts: secret seeding, token rotation, backups
 docs/                     Architecture, release/deploy flow, runbooks
+PROJECT_SPECIFICATION.md  Shipped product, API, data, privacy and security behavior
 graphify-out/             Generated code graph (ignored)
 ```
 
 ## Source Of Truth
 
+- Product, API, data, privacy, and security requirements live in `PROJECT_SPECIFICATION.md`.
+- Never read `PROJECT_SPECIFICATION.md` whole unless its "How to read this file" section says
+  it is small enough. Start with the first read given there (header and section map), then
+  read only the map entries your task touches, or grep when you already know the symbol.
+- That file records shipped behavior only. If it does not describe a behavior, that behavior is not built.
 - `Taskfile.yml` is the local and CI command contract.
 - This repository is the only one. `main` is both code history and ArgoCD desired state (`infra/`). Secrets live in OpenBao/ESO and Bitwarden, never in git; private operator values live in the ignored `ops/local.env`.
 - ArgoCD + Kustomize/Helm own local Kubernetes resources. Manual `kubectl apply` is only for reviewed bootstrap or emergency recovery.
 - Each deployable app should have one ArgoCD application or generated ApplicationSet entry.
 - Public tunnel: cloudflared in k3s to web plus the webhook-only proxy; token in OpenBao. See `docs/runbooks/cloudflare-tunnel.md`.
 - Adopted Helm releases are managed by ArgoCD. Do not use `helm upgrade` on them unless a runbook explicitly says so.
+
+## Specification maintenance
+
+- Update `PROJECT_SPECIFICATION.md` in the same change when altering product behavior, API
+  contracts, data models, privacy/security behavior, or ownership boundaries, then refresh the
+  section map's line ranges (a stale map sends the next reader to the wrong section).
+- Do not put plans, target designs, open questions, acceptance checklists, or TODOs in
+  `PROJECT_SPECIFICATION.md`.
 
 ## Commands
 
@@ -47,7 +90,6 @@ go-task service:test SERVICE=users          # also service:lint, service:dev
 go-task infra:check                         # render every kustomization, reject inline Secret data
 go-task repo:secret-scan
 sudo python3 ops/install-buildah-seccomp.py  # node-local Buildah profile after runtime updates
-graphify update .                           # after modifying code files
 ```
 
 Live infra mutation needs explicit approval and a narrow reason. The CNPG restore gate (a backup plus a disposable restore cluster) is only for backup/data-sensitive work, run with explicit approval. Operator scripts are in `ops/`; after changing `ops/backup/` or `ops/cnpg-restore-gate.sh`, run `go-task ops:backup:install` so cron runs the new copy.
@@ -83,51 +125,9 @@ The product and source are Perlimen. Deployed legacy identifiers are intentional
 - GDPR is a hard constraint: minimize data, delete or anonymize personal data, preserve public thread integrity where appropriate.
 - No third-party trackers. Analytics, if added, must be self-hosted and privacy-aware.
 
-## MVP Domain
+## MVP Domain And Status
 
-Users and profiles:
-
-- `users` owns product accounts, credentials, sessions, email verification, password reset, onboarding, Consumer/Artist profiles, Pages, PageMembership, follows, the canonical account-level block registry, public profile read models, and account deletion/anonymization.
-- Page roles are `owner`, `admin`, `editor`. Enforce roles in the backend, not only UI.
-
-Social:
-
-- `social` owns official groups, group membership, text posts, comments, replies up to two levels, post/comment up/down votes, post emoji reactions, chronological feed, reports, and social interaction enforcement for blocks. Do not create a third block source of truth; if `social` stores block rows, treat them as enforcement/projection data for social flows.
-- A post may optionally link to an event.
-- Mentions of users/profiles/pages should become links and notification sources when the notification spine exists.
-
-Media:
-
-- `media` owns image validation, object storage writes, and WebP derivatives.
-- Valid contexts include avatars, page avatars, event posters, and implemented post-image flows.
-- Never accept user-controlled bucket names or object keys.
-
-Events:
-
-- `events` owns event CRUD, Page Admin/Editor authorization, event posters by `MediaAsset`, anonymous public read model, public SSR pages, Open Graph data, follow, and boost.
-- Canonical location modes are `public_location`, `tba`, and `secret_location`. `secret_location` remains reserved for event create/update until the encrypted exact-location reveal slice lands. Guestlist/QR access exists without enabling plaintext secret-location storage.
-- Secret-location address and instructions are client-side encrypted for authorized users/devices; the backend keeps metadata only, never the plaintext location. Revoking access cannot un-reveal a location, so do not pretend it does.
-- Guestlists are private, never a public application flow: no "request access", "join guestlist", public invite codes, or guestlist discovery UX. Organizers/Page Admins add and remove guests (who get a notification and their own access view); each line-up artist adds guests up to an organizer-set per-event quota, enforced server-side and audited.
-- Check-in: the guest shows a QR that is a short-lived, opaque, server-verified token bound to user, event, entitlement and expiry, with no PII, location or static IDs. Only the organizer or authorized door staff get the check-in view, which shows minimal confirmation (status, username, avatar, check-in state). It proves account control, not legal identity.
-
-Notifications and discovery:
-
-- Notifications exist for the current MVP interaction flows. New sensitive flows, especially encrypted secret-location reveal, must add explicit notification events and preferences when implemented.
-- Search should cover artists, clubs/pages, collectives, events, and groups. Use Postgres full-text search before adding an external search engine.
-- Discovery favors followed content, chronological context, and search over algorithmic feeds.
-- In Focus Feed, scrolling inside an expanded post must not advance to the next post; keep feed navigation separate from reading state.
-
-## Current MVP Status
-
-The local technical MVP is live on the NUC: `web`, `auth-gateway`, `users`, `social`, `media`, `events` plus the platform (Woodpecker, Harbor, ArgoCD, CNPG backups, OpenBao/ESO, LGTM). Product auth, media, events, guestlists/QR check-in, report/block, notifications, mentions, unified feed and search are implemented. Encrypted exact-location reveal for `secret_location` is deliberately post-MVP; create/update still rejects it.
-
-Open MVP gates:
-
-1. Resend delivery: `ExternalSecret/users-email` and the users Deployment reference are wired. The maintainer verifies real register/verify/reset delivery after seeding OpenBao `threshold/users/email`.
-2. The maintainer runs the disposable-account product-auth smoke. Internal admin SSO QA waits for trusted HTTPS on the Authentik chain.
-3. Confirm web memory stays stable (the earlier recurring OOM) before calling the cluster clean.
-
-Do not pull post-MVP work into the MVP unless the user explicitly changes scope.
+Service ownership and shipped MVP state live in `PROJECT_SPECIFICATION.md` §5.2 and §3; do not pull post-MVP work into the MVP unless the user explicitly changes scope.
 
 ## Non-Goals
 
