@@ -3,8 +3,8 @@
 | Field | Value |
 | --- | --- |
 | **Status** | Accepted — describes shipped behavior |
-| **Version** | 1.0.0 |
-| **Owner** | Filip Białogrecki (maintainer) |
+| **Version** | 1.1.0 |
+| **Owner** | Engineering |
 | **Last updated** | 2026-11-16 |
 | **Verified against** | `apps/web/src/`, `apps/web/package.json`, `services/*/src/`, `libs/py/perlimen_common/`, `infra/argocd/`, `infra/kustomize/`, `.github/workflows/ci.yml`, `.woodpecker/`, `Taskfile.yml`, `pyproject.toml` |
 
@@ -37,43 +37,43 @@ Keep this map correct: line ranges shift whenever content is added or removed.
 | --- | --- | --- |
 | **1** | **Specification governance** — changing anything in this file | 80-90 |
 | **2** | **Vision and scope** — you need product framing or the MVP boundary | 91-109 |
-| **3** | **Functional requirements** — changing product behavior | 110-275 |
+| **3** | **Functional requirements** — changing product behavior | 110-279 |
 | 3.1 | Access model and web routes | 112-128 |
 | 3.2 | Accounts and authentication | 129-149 |
 | 3.3 | Identity, profiles, Pages and follows | 150-167 |
 | 3.4 | Groups, posts and comments | 168-178 |
-| 3.5 | Feed | 179-189 |
-| 3.6 | Events | 190-204 |
-| 3.7 | Guestlists and check-in | 205-218 |
-| 3.8 | Media | 219-231 |
-| 3.9 | Notifications | 232-240 |
-| 3.10 | Search and mentions | 241-249 |
-| 3.11 | Safety: blocks, reports, moderation | 250-260 |
-| 3.12 | Account erasure | 261-275 |
-| **4** | **Non-functional requirements** — touching limits, i18n, observability, health | 276-293 |
-| **5** | **System context** — you need the repo layout or the ownership split | 294-332 |
-| 5.1 | Repository layout | 296-316 |
-| 5.2 | Service ownership | 317-332 |
-| **6** | **Architecture** — touching runtime, service transports, CI/CD or GitOps | 333-375 |
-| 6.1 | Runtime | 335-350 |
-| 6.2 | Service-to-service transports | 351-362 |
-| 6.3 | Build, publication and deployment | 363-375 |
-| **7** | **Security** — touching auth, trust boundaries, secrets or headers | 376-393 |
-| **8** | **Privacy and data retention** — touching personal data, deletion or backups | 394-407 |
-| **9** | **Data model** — changing tables or migrations | 408-444 |
-| 9.1 | users | 413-423 |
-| 9.2 | social | 424-429 |
-| 9.3 | events | 430-437 |
-| 9.4 | media | 438-444 |
-| **10** | **API contract** — adding or changing an endpoint | 445-524 |
-| 10.1 | Conventions | 447-452 |
-| 10.2 | users | 453-474 |
-| 10.3 | social | 475-488 |
-| 10.4 | events | 489-504 |
-| 10.5 | media and auth-gateway | 505-511 |
-| 10.6 | Web BFF | 512-524 |
-| **11** | **Test plan** — you need test locations, gates or CI jobs | 525-540 |
-| **12** | **References** — you need operational detail kept out of this file | 541-550 |
+| 3.5 | Feed | 179-191 |
+| 3.6 | Events | 192-206 |
+| 3.7 | Guestlists and check-in | 207-222 |
+| 3.8 | Media | 223-235 |
+| 3.9 | Notifications | 236-244 |
+| 3.10 | Search and mentions | 245-253 |
+| 3.11 | Safety: blocks, reports, moderation | 254-264 |
+| 3.12 | Account erasure | 265-279 |
+| **4** | **Non-functional requirements** — touching limits, i18n, observability, health | 280-297 |
+| **5** | **System context** — you need the repo layout or the ownership split | 298-336 |
+| 5.1 | Repository layout | 300-320 |
+| 5.2 | Service ownership | 321-336 |
+| **6** | **Architecture** — touching runtime, service transports, CI/CD or GitOps | 337-381 |
+| 6.1 | Runtime | 339-356 |
+| 6.2 | Service-to-service transports | 357-368 |
+| 6.3 | Build, publication and deployment | 369-381 |
+| **7** | **Security** — touching auth, trust boundaries, secrets or headers | 382-399 |
+| **8** | **Privacy and data retention** — touching personal data, deletion or backups | 400-413 |
+| **9** | **Data model** — changing tables or migrations | 414-450 |
+| 9.1 | users | 419-429 |
+| 9.2 | social | 430-435 |
+| 9.3 | events | 436-443 |
+| 9.4 | media | 444-450 |
+| **10** | **API contract** — adding or changing an endpoint | 451-530 |
+| 10.1 | Conventions | 453-458 |
+| 10.2 | users | 459-480 |
+| 10.3 | social | 481-494 |
+| 10.4 | events | 495-510 |
+| 10.5 | media and auth-gateway | 511-517 |
+| 10.6 | Web BFF | 518-530 |
+| **11** | **Test plan** — you need test locations, gates or CI jobs | 531-546 |
+| **12** | **References** — you need operational detail kept out of this file | 547-556 |
 
 ---
 
@@ -185,7 +185,9 @@ name (namespace, env var prefix, headers, cookies, buckets). See `docs/rebrandin
 - The web app assembles the Feed in `apps/web/src/lib/feed/assembly.ts` from posts, event
   feed candidates, event updates and guestlist access notifications, with filters `all`,
   `posts`, `events` and `access`.
-- `/app/prototypes/feed-modes` is a session-gated prototype comparing feed presentations.
+- `/app/prototypes/feed-modes` is a session-gated prototype comparing classic, focus (one
+  card at a time) and compact presentations over fixture items. In focus mode, wheel and
+  swipe do not move to the next card while a post is expanded.
 
 ### 3.6 Events
 
@@ -212,7 +214,9 @@ name (namespace, env var prefix, headers, cookies, buckets). See `docs/rebrandin
 - Check-in: the guest mints a QR token (`/guestlist/me/qr-token`), an opaque 32-byte random
   value stored as a hash, valid 300 seconds, single use; minting revokes the guest's earlier
   unused tokens. Managers and assigned door staff redeem it (`/check-in`). Expired, used or
-  revoked tokens and already-checked-in guests are rejected.
+  revoked tokens and already-checked-in guests are rejected. A token is bound to one event
+  and guestlist entry and carries no personal data or IDs. The check-in response shows only
+  the status and the guest's name. Check-in proves account control, not legal identity.
 - Door staff are assigned by username. Access changes are written to
   `event_access_audit_logs`.
 
@@ -344,6 +348,8 @@ service.
   (`python -m <svc>.migrate`).
 - Object storage: SeaweedFS S3 (bucket `threshold-media`). Messaging: NATS Core.
 - Secrets: OpenBao, synced by External Secrets Operator.
+- The cluster runs on one NUC host. Woodpecker, Harbor, OpenBao and Authentik also run in
+  it; OpenBao, Harbor and Authentik are installed outside Argo CD.
 - Public access: `cloudflared` (Argo CD app `threshold-cloudflared`) forwards to the web
   Service only. A separate webhook-only proxy (`threshold-woodpecker-webhook`) exposes the
   Woodpecker hook endpoint.

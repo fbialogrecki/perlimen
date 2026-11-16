@@ -125,51 +125,9 @@ The product and source are Perlimen. Deployed legacy identifiers are intentional
 - GDPR is a hard constraint: minimize data, delete or anonymize personal data, preserve public thread integrity where appropriate.
 - No third-party trackers. Analytics, if added, must be self-hosted and privacy-aware.
 
-## MVP Domain
+## MVP Domain And Status
 
-Users and profiles:
-
-- `users` owns product accounts, credentials, sessions, email verification, password reset, onboarding, Consumer/Artist profiles, Pages, PageMembership, follows, the canonical account-level block registry, public profile read models, and account deletion/anonymization.
-- Page roles are `owner`, `admin`, `editor`. Enforce roles in the backend, not only UI.
-
-Social:
-
-- `social` owns official groups, group membership, text posts, comments, replies up to two levels, post/comment up/down votes, post emoji reactions, chronological feed, reports, and social interaction enforcement for blocks. Do not create a third block source of truth; if `social` stores block rows, treat them as enforcement/projection data for social flows.
-- A post may optionally link to an event.
-- Mentions of users/profiles/pages should become links and notification sources when the notification spine exists.
-
-Media:
-
-- `media` owns image validation, object storage writes, and WebP derivatives.
-- Valid contexts include avatars, page avatars, event posters, and implemented post-image flows.
-- Never accept user-controlled bucket names or object keys.
-
-Events:
-
-- `events` owns event CRUD, Page Admin/Editor authorization, event posters by `MediaAsset`, anonymous public read model, public SSR pages, Open Graph data, follow, and boost.
-- Canonical location modes are `public_location`, `tba`, and `secret_location`. `secret_location` remains reserved for event create/update until the encrypted exact-location reveal slice lands. Guestlist/QR access exists without enabling plaintext secret-location storage.
-- Secret-location address and instructions are client-side encrypted for authorized users/devices; the backend keeps metadata only, never the plaintext location. Revoking access cannot un-reveal a location, so do not pretend it does.
-- Guestlists are private, never a public application flow: no "request access", "join guestlist", public invite codes, or guestlist discovery UX. Organizers/Page Admins add and remove guests (who get a notification and their own access view); each line-up artist adds guests up to an organizer-set per-event quota, enforced server-side and audited.
-- Check-in: the guest shows a QR that is a short-lived, opaque, server-verified token bound to user, event, entitlement and expiry, with no PII, location or static IDs. Only the organizer or authorized door staff get the check-in view, which shows minimal confirmation (status, username, avatar, check-in state). It proves account control, not legal identity.
-
-Notifications and discovery:
-
-- Notifications exist for the current MVP interaction flows. New sensitive flows, especially encrypted secret-location reveal, must add explicit notification events and preferences when implemented.
-- Search should cover artists, clubs/pages, collectives, events, and groups. Use Postgres full-text search before adding an external search engine.
-- Discovery favors followed content, chronological context, and search over algorithmic feeds.
-- In Focus Feed, scrolling inside an expanded post must not advance to the next post; keep feed navigation separate from reading state.
-
-## Current MVP Status
-
-The local technical MVP is live on the NUC: `web`, `auth-gateway`, `users`, `social`, `media`, `events` plus the platform (Woodpecker, Harbor, ArgoCD, CNPG backups, OpenBao/ESO, LGTM). Product auth, media, events, guestlists/QR check-in, report/block, notifications, mentions, unified feed and search are implemented. Encrypted exact-location reveal for `secret_location` is deliberately post-MVP; create/update still rejects it.
-
-Open MVP gates:
-
-1. Resend delivery: `ExternalSecret/users-email` and the users Deployment reference are wired. The maintainer verifies real register/verify/reset delivery after seeding OpenBao `threshold/users/email`.
-2. The maintainer runs the disposable-account product-auth smoke. Internal admin SSO QA waits for trusted HTTPS on the Authentik chain.
-3. Confirm web memory stays stable (the earlier recurring OOM) before calling the cluster clean.
-
-Do not pull post-MVP work into the MVP unless the user explicitly changes scope.
+Service ownership and shipped MVP state live in `PROJECT_SPECIFICATION.md` §5.2 and §3; do not pull post-MVP work into the MVP unless the user explicitly changes scope.
 
 ## Non-Goals
 
