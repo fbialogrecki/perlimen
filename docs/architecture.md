@@ -1,6 +1,6 @@
 # Perlimen Architecture
 
-This is the current architecture summary. `AGENTS.md` is the source of truth for product scope and service ownership; this file describes how the pieces run and talk to each other.
+This is the current architecture summary. `PROJECT_SPECIFICATION.md` is the source of truth for shipped product behavior and service ownership, and `AGENTS.md` for working rules; this file describes how the pieces run and talk to each other.
 
 The product and source are Perlimen. Deployed legacy identifiers are intentionally retained until a separate live migration; see `docs/rebranding.md`.
 
@@ -190,4 +190,4 @@ The approved public path is Cloudflare HTTPS → `cloudflared` → `http://web.t
 
 ## Deployment
 
-Releases are tag-driven and promote image digests into `infra/` through a pull request; Argo CD syncs after the merge. Database migrations run as Argo CD `Sync` hook Jobs. See `docs/release-and-deploy.md`.
+Application pushes to `main` publish images automatically and promote their digests into `infra/` through an auto-merging pull request; Argo CD syncs after the merge. Database migrations run as Argo CD `Sync` hook Jobs. See `docs/release-and-deploy.md`.

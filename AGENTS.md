@@ -4,10 +4,39 @@ Perlimen is a social and event-discovery platform for the music scene. The MVP p
 
 This file is the active project briefing for coding agents: product scope, architecture rules, and implementation guidance. Keep it concise and update it in the same change that alters a convention.
 
+## Required task startup and skills
+
+- At the start of every new task, before analysis, planning, or edits, read
+  `PROJECT_SPECIFICATION.md`: start with its section map and then the relevant
+  sections, following this repository's specification-reading rules below.
+- Always load the `graphify` skill and read the existing `graphify-out/graph.json`
+  at task startup, including for simple tasks. Inspect its structure and retrieve
+  task-relevant nodes and relationships; checking that the file exists is not
+  enough. Verify implementation decisions against current source files.
+- Automatic `graphify` use is strictly read-only. Never create, rebuild, update,
+  repair, cluster, export, or write graph files, sidecars, memories, or reflections
+  without an explicit user request for that operation. A missing or stale graph,
+  a coding request, or merely invoking the skill does not authorize graph writes.
+  Do not install tools or start watchers/hooks as part of automatic graph reading.
+  If a query command writes files or needs setup, traverse the JSON in memory.
+  These restrictions override the skill's default build/update/write workflow.
+- Before coding begins, including later in a conversation, automatically load
+  `ponytail` and apply its default `full` level unless the user selects another
+  level or opts out. Do not activate it for prose-only tasks.
+- These are explicit exceptions to any general manual-only skill policy:
+  `graphify` for required read-only startup and `ponytail` before coding.
+  Other skills require explicit user invocation. Resolve skills from the current
+  skill catalog; on this workstation they live under `~/.agents/skills/`.
+- If the specification, graph, or a required skill is missing or unreadable,
+  briefly report it and continue with available sources where possible. Do not
+  claim it was read or automatically create, install, or update it.
+- Reuse context already read in this task while files remain unchanged; do not
+  repeat startup on every follow-up message.
+
 ## How To Use This File
 
 - Treat `AGENTS.md` like code: keep it current and under 20k characters. Prefer exact commands over prose.
-- Put durable project guidance here. How the system fits together is described in `docs/architecture.md`; when a technical choice changes, update that description in the same PR. Scratch implementation notes go in `docs/plans/`, which git ignores.
+- Put durable working rules here. Shipped behavior is described in `PROJECT_SPECIFICATION.md` and the platform in `docs/architecture.md`; when a technical choice changes, update them in the same PR. Scratch implementation notes go in `docs/plans/`, which git ignores.
 - The nearest nested `AGENTS.md` also applies. For `apps/web`, read `apps/web/AGENTS.md` before touching Next.js code.
 
 ## Repository Shape
@@ -23,17 +52,31 @@ libs/py/                  Shared Python helpers
 infra/                    Kustomize, Helm values, ArgoCD app-of-apps (ArgoCD tracks main)
 ops/                      Operator scripts: secret seeding, token rotation, backups
 docs/                     Architecture, release/deploy flow, runbooks
+PROJECT_SPECIFICATION.md  Shipped product, API, data, privacy and security behavior
 graphify-out/             Generated code graph (ignored)
 ```
 
 ## Source Of Truth
 
+- Product, API, data, privacy, and security requirements live in `PROJECT_SPECIFICATION.md`.
+- Never read `PROJECT_SPECIFICATION.md` whole unless its "How to read this file" section says
+  it is small enough. Start with the first read given there (header and section map), then
+  read only the map entries your task touches, or grep when you already know the symbol.
+- That file records shipped behavior only. If it does not describe a behavior, that behavior is not built.
 - `Taskfile.yml` is the local and CI command contract.
 - This repository is the only one. `main` is both code history and ArgoCD desired state (`infra/`). Secrets live in OpenBao/ESO and Bitwarden, never in git; private operator values live in the ignored `ops/local.env`.
 - ArgoCD + Kustomize/Helm own local Kubernetes resources. Manual `kubectl apply` is only for reviewed bootstrap or emergency recovery.
 - Each deployable app should have one ArgoCD application or generated ApplicationSet entry.
 - Public tunnel: cloudflared in k3s to web plus the webhook-only proxy; token in OpenBao. See `docs/runbooks/cloudflare-tunnel.md`.
 - Adopted Helm releases are managed by ArgoCD. Do not use `helm upgrade` on them unless a runbook explicitly says so.
+
+## Specification maintenance
+
+- Update `PROJECT_SPECIFICATION.md` in the same change when altering product behavior, API
+  contracts, data models, privacy/security behavior, or ownership boundaries, then refresh the
+  section map's line ranges (a stale map sends the next reader to the wrong section).
+- Do not put plans, target designs, open questions, acceptance checklists, or TODOs in
+  `PROJECT_SPECIFICATION.md`.
 
 ## Commands
 
@@ -47,7 +90,6 @@ go-task service:test SERVICE=users          # also service:lint, service:dev
 go-task infra:check                         # render every kustomization, reject inline Secret data
 go-task repo:secret-scan
 sudo python3 ops/install-buildah-seccomp.py  # node-local Buildah profile after runtime updates
-graphify update .                           # after modifying code files
 ```
 
 Live infra mutation needs explicit approval and a narrow reason. The CNPG restore gate (a backup plus a disposable restore cluster) is only for backup/data-sensitive work, run with explicit approval. Operator scripts are in `ops/`; after changing `ops/backup/` or `ops/cnpg-restore-gate.sh`, run `go-task ops:backup:install` so cron runs the new copy.
