@@ -1,7 +1,10 @@
 import asyncio
 import logging
+from collections.abc import Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import datetime, timedelta
+from functools import partial
 from uuid import uuid4
 
 from sqlalchemy import delete, or_, select, update
@@ -35,6 +38,13 @@ from users.social_client import anonymize_social_author
 logger = logging.getLogger(__name__)
 
 _NEXT_STAGE = {"social": "events", "events": "media", "media": "local"}
+
+
+@dataclass(frozen=True)
+class ErasureStages:
+    social: Callable[[str], None]
+    events: Callable[[str, list[str]], None]
+    media: Callable[[str], None]
 
 
 def enqueue_account_erasure(session: Session, user: ApplicationUser) -> AccountErasureJob:
@@ -111,6 +121,8 @@ def _erase_local_data(session: Session, *, user_id: str, now: datetime) -> None:
     identifiers = {user_id}
     if deleted_username:
         identifiers.add(deleted_username)
+    if user.username_normalized:
+        identifiers.add(user.username_normalized)
 
     session.execute(delete(UserSession).where(UserSession.user_id == user_id))
     session.execute(delete(EmailVerificationToken).where(EmailVerificationToken.user_id == user_id))
@@ -126,10 +138,19 @@ def _erase_local_data(session: Session, *, user_id: str, now: datetime) -> None:
             (UserBlock.blocker_user_id == user_id) | (UserBlock.blocked_user_id == user_id)
         )
     )
-    follow_predicate = (Follow.follower_user_id == user_id) | (Follow.target_id == user_id)
+    incoming = Follow.target_id == user_id
     if deleted_username:
-        follow_predicate |= Follow.target_handle == deleted_username
-    session.execute(delete(Follow).where(follow_predicate))
+        # A legacy user follow may have no resolvable ID. A Page slug or a
+        # different user's stable ID must never be matched by handle alone.
+        incoming |= (Follow.target_handle == deleted_username) & ~(
+            select(ApplicationUser.id).where(ApplicationUser.id == Follow.target_id).exists()
+        )
+    session.execute(
+        delete(Follow).where(
+            (Follow.follower_user_id == user_id)
+            | (Follow.target_type.in_(("consumer", "artist")) & incoming)
+        )
+    )
     session.execute(delete(PageMembership).where(PageMembership.user_id == user_id))
     session.execute(
         delete(PageResidency).where(
@@ -159,23 +180,38 @@ def _erase_local_data(session: Session, *, user_id: str, now: datetime) -> None:
             report.target_id = "deleted-user"
             report.target_handle = "deleted-user"
     for audit_log in session.scalars(
-        select(SafetyAuditLog).where(
-            (SafetyAuditLog.actor_user_id == user_id) | (SafetyAuditLog.target_id == user_id)
+        select(SafetyAuditLog)
+        .where(
+            (SafetyAuditLog.actor_user_id == user_id)
+            | (SafetyAuditLog.target_id == user_id)
+            | (SafetyAuditLog.metadata_json["target_user_id"].as_string() == user_id)
+            | (SafetyAuditLog.metadata_json["artist_user_id"].as_string() == user_id)
         )
+        .order_by(SafetyAuditLog.id)
+        .with_for_update()
     ):
         if audit_log.actor_user_id == user_id:
             audit_log.actor_user_id = None
         if audit_log.target_id == user_id:
             audit_log.target_id = "deleted-user"
         audit_log.metadata_json = _scrub_metadata(audit_log.metadata_json, identifiers)
-    for auth_log in session.scalars(select(AuthAuditLog).where(AuthAuditLog.user_id == user_id)):
+    for auth_log in session.scalars(
+        select(AuthAuditLog)
+        .where(
+            (AuthAuditLog.user_id == user_id)
+            | (AuthAuditLog.metadata_json["target_user_id"].as_string() == user_id)
+        )
+        .order_by(AuthAuditLog.id)
+        .with_for_update()
+    ):
         # Security events are retained, but no stable account/network/device
         # identifiers remain attached to them after erasure.
-        auth_log.user_id = None
-        auth_log.subject_hash = None
-        auth_log.ip_hash = None
-        auth_log.user_agent_hash = None
-        auth_log.request_id = None
+        if auth_log.user_id == user_id:
+            auth_log.user_id = None
+            auth_log.subject_hash = None
+            auth_log.ip_hash = None
+            auth_log.user_agent_hash = None
+            auth_log.request_id = None
         auth_log.metadata_json = _scrub_metadata(auth_log.metadata_json, identifiers)
 
     user.status = "deleted"
@@ -201,10 +237,9 @@ def _finish_stage(
 ) -> bool:
     with factory() as session:
         job = session.scalar(
-            select(AccountErasureJob).where(
-                AccountErasureJob.id == job_id,
-                AccountErasureJob.lease_owner == owner,
-            )
+            select(AccountErasureJob)
+            .where(AccountErasureJob.id == job_id, AccountErasureJob.lease_owner == owner)
+            .with_for_update()
         )
         if job is None or job.current_stage != stage:
             return False
@@ -226,10 +261,9 @@ def _record_failure(
 ) -> None:
     with factory() as session:
         job = session.scalar(
-            select(AccountErasureJob).where(
-                AccountErasureJob.id == job_id,
-                AccountErasureJob.lease_owner == owner,
-            )
+            select(AccountErasureJob)
+            .where(AccountErasureJob.id == job_id, AccountErasureJob.lease_owner == owner)
+            .with_for_update()
         )
         if job is None:
             return
@@ -243,7 +277,7 @@ def _record_failure(
 
 
 def _process_claimed_job(
-    factory: sessionmaker[Session], settings: Settings, *, job_id: str, owner: str, now: datetime
+    factory: sessionmaker[Session], stages: ErasureStages, *, job_id: str, owner: str, now: datetime
 ) -> None:
     while True:
         with factory() as session:
@@ -265,11 +299,11 @@ def _process_claimed_job(
             )
         try:
             if stage == "social":
-                anonymize_social_author(settings, user_id)
+                stages.social(user_id)
             elif stage == "events":
-                erase_events_account(settings, user_id, artist_profile_ids)
+                stages.events(user_id, artist_profile_ids)
             elif stage == "media":
-                erase_media_assets(settings, user_id)
+                stages.media(user_id)
             elif stage != "local":
                 raise RuntimeError("invalid account erasure stage")
             if not _finish_stage(factory, job_id=job_id, owner=owner, stage=stage, now=now):
@@ -286,11 +320,18 @@ def run_account_erasure_jobs(
     factory: sessionmaker[Session],
     *,
     settings: Settings | None = None,
+    stages: ErasureStages | None = None,
     max_jobs: int = 10,
     now: datetime | None = None,
 ) -> int:
     run_at = now or utc_now()
     worker_settings = settings or Settings()
+    if stages is None:
+        stages = ErasureStages(
+            social=partial(anonymize_social_author, worker_settings),
+            events=partial(erase_events_account, worker_settings),
+            media=partial(erase_media_assets, worker_settings),
+        )
     processed = 0
     for _ in range(max_jobs):
         claim = _claim_next_job(
@@ -302,7 +343,7 @@ def run_account_erasure_jobs(
             break
         _process_claimed_job(
             factory,
-            worker_settings,
+            stages,
             job_id=claim[0],
             owner=claim[1],
             now=run_at,
@@ -312,11 +353,17 @@ def run_account_erasure_jobs(
 
 
 async def account_erasure_worker(
-    factory: sessionmaker[Session], settings: Settings, stop: asyncio.Event
+    factory: sessionmaker[Session],
+    settings: Settings,
+    stop: asyncio.Event,
+    *,
+    stages: ErasureStages | None = None,
 ) -> None:
     while not stop.is_set():
         try:
-            await asyncio.to_thread(run_account_erasure_jobs, factory, settings=settings)
+            await asyncio.to_thread(
+                run_account_erasure_jobs, factory, settings=settings, stages=stages
+            )
         except Exception:
             logger.exception("account erasure worker pass failed")
         with suppress(TimeoutError):

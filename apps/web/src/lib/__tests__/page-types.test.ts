@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test"
 
 import { displayPageType, PAGE_TYPES, pageRole, pageType } from "@/lib/page-types"
 import { profileHref } from "@/lib/profile-href"
+import { profileName } from "@/lib/profile-name"
 
 describe("page types", () => {
   it("preserves all backend page types", () => {
@@ -35,5 +36,16 @@ describe("page types", () => {
       "/pages/project-slug",
       "/pages/festival-slug",
     ])
+  })
+
+  it("does not link erased attribution to a real user with the sentinel handle", () => {
+    const erased = {
+      id: "deleted-user", type: "consumer" as const, handle: "deleted-user", displayName: "Deleted User",
+    }
+    expect(profileName(erased)).toBe("Deleted User")
+    expect(profileHref(erased)).toBeNull()
+    const active = { ...erased, id: "active-user-id" }
+    expect(profileName(active)).toBe("deleted-user")
+    expect(profileHref(active)).toBe("/u/deleted-user")
   })
 })

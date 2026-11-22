@@ -19,41 +19,7 @@ def client(*, transport: str = "http", internal_token: str | None = "test-intern
 
 
 @pytest.mark.asyncio
-async def test_http_profile_request_sends_internal_token(monkeypatch) -> None:
-    request: dict[str, Any] = {}
-
-    class FakeResponse:
-        def raise_for_status(self) -> None:
-            return None
-
-        def json(self) -> dict[str, object]:
-            return {"user": {"id": "user-1"}}
-
-    class FakeAsyncClient:
-        def __init__(self, *, timeout: float, trust_env: bool) -> None:
-            assert timeout == 1
-            assert not trust_env
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args: object) -> None:
-            return None
-
-        async def post(self, url: str, **kwargs: object) -> FakeResponse:
-            request.update(url=url, **kwargs)
-            return FakeResponse()
-
-    monkeypatch.setattr(users_client.httpx, "AsyncClient", FakeAsyncClient)
-
-    await client().current_profile(subject="subject", email=None, username="ada")
-
-    assert request["url"] == "http://users.test/internal/v1/current-profile"
-    assert request["headers"] == {"X-Threshold-Internal-Token": "test-internal-token"}
-
-
-@pytest.mark.asyncio
-async def test_http_profile_request_fails_closed_without_internal_token(monkeypatch) -> None:
+async def test_http_identity_request_fails_closed_without_internal_token(monkeypatch) -> None:
     class UnexpectedAsyncClient:
         def __init__(self, **_: object) -> None:
             raise AssertionError("HTTP request must not start without an internal token")
@@ -61,15 +27,15 @@ async def test_http_profile_request_fails_closed_without_internal_token(monkeypa
     monkeypatch.setattr(users_client.httpx, "AsyncClient", UnexpectedAsyncClient)
 
     with pytest.raises(
-        UsersProfileClientError, match="users profile HTTP transport is not configured"
+        UsersProfileClientError, match="operator identity HTTP transport is not configured"
     ):
-        await client(internal_token=None).current_profile(
-            subject="subject", email=None, username=None
+        await client(internal_token=None).confirm_operator_identity(
+            {"subject": "subject", "email": None, "username": None}
         )
 
 
 @pytest.mark.asyncio
-async def test_http_profile_errors_and_logs_do_not_expose_internal_token(
+async def test_http_identity_errors_and_logs_do_not_expose_internal_token(
     monkeypatch, caplog
 ) -> None:
     token = "do-not-log-this-token"
@@ -91,11 +57,11 @@ async def test_http_profile_errors_and_logs_do_not_expose_internal_token(
     caplog.set_level(logging.DEBUG)
 
     with pytest.raises(UsersProfileClientError) as exc_info:
-        await client(internal_token=token).current_profile(
-            subject="subject", email=None, username=None
+        await client(internal_token=token).confirm_operator_identity(
+            {"subject": "subject", "email": None, "username": None}
         )
 
-    assert str(exc_info.value) == "users profile HTTP request failed"
+    assert str(exc_info.value) == "operator identity HTTP request failed"
     assert token not in str(exc_info.value)
     assert token not in caplog.text
 

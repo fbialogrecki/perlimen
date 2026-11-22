@@ -1,3 +1,4 @@
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -12,7 +13,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 from jwt.algorithms import RSAAlgorithm
 
-from perlimen_common.auth import JwtVerifier, Principal
+from perlimen_common.auth import Principal
 
 
 def test_healthz() -> None:
@@ -44,6 +45,8 @@ class FakeJwtVerifier:
 
 @dataclass
 class FakeUsersProfileClient:
+    transport = "nats"
+
     async def current_profile(
         self,
         *,
@@ -127,16 +130,16 @@ def test_http_gateway_requires_admin_audience_not_product_cookie(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("THRESHOLD_INTERNAL_TOKEN", "test-internal-token")
+    issuer = "http://127.0.0.1:3801/admin/"
     config = main.Settings(
         users_transport="http",
         users_base_url="http://127.0.0.1:3800/users",
+        authentik_issuer=issuer,
+        authentik_jwks_url=f"{issuer}jwks/",
         authentik_audience="perlimen-admin-test",
     )
-    issuer = "https://id.example.test/admin/"
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    verifier = JwtVerifier(
-        issuer=issuer, jwks_url=f"{issuer}jwks/", audience=config.authentik_audience
-    )
+    verifier = main._build_jwt_verifier(config)
     jwks = jwt.PyJWKClient(f"{issuer}jwks/")
     rsa_jwk = RSAAlgorithm.to_jwk(key.public_key(), as_dict=True)
     monkeypatch.setattr(jwks, "get_signing_key_from_jwt", lambda _: jwt.PyJWK(rsa_jwk))
@@ -145,12 +148,20 @@ def test_http_gateway_requires_admin_audience_not_product_cookie(
     monkeypatch.setattr(main, "users_profile_client", main._build_users_profile_client(config))
 
     requests: list[httpx.Request] = []
+    identity = {"subject": "operator", "email": "ada@example.test", "username": "ada"}
+    replies = iter(
+        (
+            httpx.Response(200, json=identity),
+            httpx.Response(200, json={**identity, "subject": "other"}),
+            httpx.Response(200, json={**identity, "profile": {"id": "product-profile"}}),
+            httpx.Response(200, content=b"unavailable"),
+            httpx.Response(307, headers={"location": "/users/internal/v1/current-profile"}),
+        )
+    )
 
     def users(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        if len(requests) > 1:
-            return httpx.Response(200, content=b"unavailable")
-        return httpx.Response(200, json={"user": {"id": "internal-profile"}})
+        return next(replies)
 
     async def unexpected_broker(*args: object, **kwargs: object) -> None:
         pytest.fail("HTTP gateway attempted a NATS connection")
@@ -163,29 +174,48 @@ def test_http_gateway_requires_admin_audience_not_product_cookie(
         lambda **kwargs: http_client(transport=httpx.MockTransport(users), **kwargs),
     )
 
-    def bearer(audience: str | None) -> dict[str, str]:
-        claims = {
+    def bearer(signing_key: rsa.RSAPrivateKey = key, **overrides: object) -> dict[str, str]:
+        claims: dict[str, object] = {
             "iss": issuer,
-            "sub": "operator",
+            "sub": identity["subject"],
+            "aud": config.authentik_audience,
             "exp": datetime.now(UTC) + timedelta(minutes=1),
+            "email": identity["email"],
+            "preferred_username": identity["username"],
+            "groups": ["operators"],
+            "roles": ["moderator"],
         }
-        if audience is not None:
-            claims["aud"] = audience
-        return {"Authorization": f"Bearer {jwt.encode(claims, key, algorithm='RS256')}"}
+        claims.update(overrides)
+        token = jwt.encode(
+            {k: v for k, v in claims.items() if v is not None}, signing_key, algorithm="RS256"
+        )
+        return {"Authorization": f"Bearer {token}"}
 
     with TestClient(app) as client:
         client.cookies.set("threshold_session", "opaque-product-session")
         assert client.get("/me").status_code == 401
-        assert client.get("/me", headers=bearer(None)).status_code == 401
-        assert client.get("/me", headers=bearer("other-application")).status_code == 401
+        for rejected in (
+            bearer(aud=None),
+            bearer(aud="other-application"),
+            bearer(iss="http://127.0.0.1:3801/other/"),
+            bearer(exp=None),
+            bearer(exp=datetime.now(UTC) - timedelta(seconds=1)),
+            bearer(rsa.generate_private_key(public_exponent=65537, key_size=2048)),
+        ):
+            assert client.get("/me", headers=rejected).status_code == 401
+        assert client.get("/me", headers={"Authorization": "Bearer malformed"}).status_code == 401
         assert not requests
-        response = client.get("/me", headers=bearer("perlimen-admin-test"))
+        response = client.get("/me", headers=bearer())
         assert response.status_code == 200
-        assert response.json()["profile"] == {"user": {"id": "internal-profile"}}
+        assert response.json() == {"status": "authenticated", **identity}
+        assert response.headers["cache-control"] == "no-store"
         assert "set-cookie" not in response.headers
-        assert client.get("/me", headers=bearer("perlimen-admin-test")).status_code == 503
+        for _ in range(4):
+            assert client.get("/me", headers=bearer()).status_code == 503
+    assert len(requests) == 5
     request = requests[0]
     assert request.method == "POST"
-    assert request.url == "http://127.0.0.1:3800/users/internal/v1/current-profile"
+    assert request.url == "http://127.0.0.1:3800/users/internal/v1/operator-identity"
+    assert json.loads(request.content) == identity
     assert request.headers["X-Threshold-Internal-Token"] == "test-internal-token"
     assert "authorization" not in request.headers and "cookie" not in request.headers

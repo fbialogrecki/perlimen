@@ -60,10 +60,19 @@ Social delivery for the same event ID. Social's unique event-to-post mapping pre
 duplicate announcements. Delivery is best effort when Social or the official group is unavailable.
 Guestlist and QR operations keep Events' authorization and transaction rules in both profiles.
 
-Other cross-domain integrations can still be unavailable: legacy outbound URLs are disabled
-in this process. The existing users erasure worker is registered with the users
-session factory, but end-to-end erasure is not enabled by this alone.
-The isolated smoke test asserts real PostgreSQL behavior, not whole-product readiness.
+Other cross-domain integrations can still be unavailable: legacy outbound URLs/NATS are
+disabled in this process.
+
+## Account erasure
+
+Settings submits `DELETE /api/me` through the BFF. A `202` means Users durably queued the
+request and invalidated all access and refresh sessions, not that every deletion has finished.
+The Users worker calls Social, Events and Media in order, using each owner's runtime session
+and the same erasure operations as standalone. It saves progress in PostgreSQL and resumes
+due jobs after restart; a job interrupted while leased is eligible once the lease expires.
+Owner writes are fenced by the persisted tombstones; Social retains the discussion and
+replies with anonymous attribution, not a link to a profile. No extra worker or HTTP hop is
+needed. The flow covers the active database and media directory, not earlier copies.
 
 ## Broker and operator SSO
 
@@ -72,7 +81,7 @@ lifespans. The standalone NATS clients and deployment stay in place:
 
 | NATS subject | Standalone client and handler | Lite path |
 | --- | --- | --- |
-| `users.current_profile.v1` | auth-gateway request → Users responder | Optional gateway calls `POST /users/internal/v1/current-profile` over HTTP with the internal token |
+| `users.current_profile.v1` | auth-gateway request → Users responder | Not used. The optional gateway confirms operator identity via `POST /users/internal/v1/operator-identity` with the internal token |
 | `users.follow.list_following.v1` | Social request → Users responder | Social reads the canonical follows through the Users owner API |
 | `users.block.changed.v1` | Users publisher → Social subscriber (standalone also repairs via HTTP) | Social reads canonical blocks through the Users owner API; no projection or repair loop |
 
@@ -81,9 +90,11 @@ legacy cluster, not the Lite launcher.
 
 Product email/password sessions work without Authentik or the gateway. If run separately for
 operator SSO, the gateway accepts an Authentik bearer for the dedicated admin audience, not a
-product cookie. Restrict the Authentik application to operators; `aud` identifies the intended
-application, not a user's membership in a group. The gateway resolves an internal profile and
-does not mint a product cookie, grant product roles or replace the owning domain's authorization.
+product cookie. An operator-only Authentik policy must restrict token issuance; `aud` identifies
+the intended application, not a user's membership in a group. The private Lite handler has no
+database dependency. The gateway returns only the verified operator identity and does not
+create or link a product account, reserve names, issue sessions or grant product roles. The
+legacy profile-writing endpoint is not mounted in Lite.
 See [auth-gateway configuration](../services/auth-gateway/README.md#optional-lite-configuration).
 
 ## Media
@@ -114,8 +125,13 @@ PERLIMEN_LITE_TEST_FRESH_POSTGRES=1 uv run --frozen python -m pytest -q perlimen
 
 The test rejects an already populated schema, runs the migration CLI twice,
 checks own-schema access and sibling/DDL denials, then exercises the composed app. It
+checks operator SSO against a synthetic loopback JWKS and private Lite HTTP, then
+registers the same username and email as an ordinary product account. It also
 compares SQL query counts for one versus multiple Feed posts and checks that the canonical
 block takes effect immediately with no Social projection table.
 It also verifies announcement replay and races two authorized scans on separate PostgreSQL
-connections, checking the committed admission and audit row. It creates synthetic accounts;
-destroy only that disposable test instance afterwards.
+connections, checking the committed admission and audit row. The account erasure scenario
+forces a Media failure, kills the loopback API while it holds a retry lease, then restarts it
+with the same database and media root. It checks revoked sessions, write fences, physical
+deletion, and anonymous thread continuity with an unaffected control account. It creates
+synthetic accounts; destroy only that disposable test instance afterwards.

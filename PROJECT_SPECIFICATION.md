@@ -37,7 +37,7 @@ Keep this map correct: line ranges shift whenever content is added or removed.
 | --- | --- | --- |
 | **1** | **Specification governance** — changing anything in this file | 80-90 |
 | **2** | **Vision and scope** — you need product framing or the MVP boundary | 91-109 |
-| **3** | **Functional requirements** — changing product behavior | 110-288 |
+| **3** | **Functional requirements** — changing product behavior | 110-292 |
 | 3.1 | Access model and web routes | 112-128 |
 | 3.2 | Accounts and authentication | 129-149 |
 | 3.3 | Identity, profiles, Pages and follows | 150-167 |
@@ -49,31 +49,31 @@ Keep this map correct: line ranges shift whenever content is added or removed.
 | 3.9 | Notifications | 243-251 |
 | 3.10 | Search and mentions | 252-260 |
 | 3.11 | Safety: blocks, reports, moderation | 261-273 |
-| 3.12 | Account erasure | 274-288 |
-| **4** | **Non-functional requirements** — touching limits, i18n, observability, health | 289-306 |
-| **5** | **System context** — you need the repo layout or the ownership split | 307-345 |
-| 5.1 | Repository layout | 309-329 |
-| 5.2 | Service ownership | 330-345 |
-| **6** | **Architecture** — touching runtime, service transports, CI/CD or GitOps | 346-398 |
-| 6.1 | Runtime | 348-372 |
-| 6.2 | Service-to-service transports | 373-385 |
-| 6.3 | Build, publication and deployment | 386-398 |
-| **7** | **Security** — touching auth, trust boundaries, secrets or headers | 399-416 |
-| **8** | **Privacy and data retention** — touching personal data, deletion or backups | 417-430 |
-| **9** | **Data model** — changing tables or migrations | 431-467 |
-| 9.1 | users | 436-446 |
-| 9.2 | social | 447-452 |
-| 9.3 | events | 453-460 |
-| 9.4 | media | 461-467 |
-| **10** | **API contract** — adding or changing an endpoint | 468-547 |
-| 10.1 | Conventions | 470-475 |
-| 10.2 | users | 476-497 |
-| 10.3 | social | 498-511 |
-| 10.4 | events | 512-527 |
-| 10.5 | media and auth-gateway | 528-534 |
-| 10.6 | Web BFF | 535-547 |
-| **11** | **Test plan** — you need test locations, gates or CI jobs | 548-563 |
-| **12** | **References** — you need operational detail kept out of this file | 564-573 |
+| 3.12 | Account erasure | 274-292 |
+| **4** | **Non-functional requirements** — touching limits, i18n, observability, health | 293-310 |
+| **5** | **System context** — you need the repo layout or the ownership split | 311-349 |
+| 5.1 | Repository layout | 313-333 |
+| 5.2 | Service ownership | 334-349 |
+| **6** | **Architecture** — touching runtime, service transports, CI/CD or GitOps | 350-405 |
+| 6.1 | Runtime | 352-378 |
+| 6.2 | Service-to-service transports | 379-392 |
+| 6.3 | Build, publication and deployment | 393-405 |
+| **7** | **Security** — touching auth, trust boundaries, secrets or headers | 406-425 |
+| **8** | **Privacy and data retention** — touching personal data, deletion or backups | 426-439 |
+| **9** | **Data model** — changing tables or migrations | 440-476 |
+| 9.1 | users | 445-455 |
+| 9.2 | social | 456-461 |
+| 9.3 | events | 462-469 |
+| 9.4 | media | 470-476 |
+| **10** | **API contract** — adding or changing an endpoint | 477-561 |
+| 10.1 | Conventions | 479-484 |
+| 10.2 | users | 485-507 |
+| 10.3 | social | 508-521 |
+| 10.4 | events | 522-537 |
+| 10.5 | media and auth-gateway | 538-548 |
+| 10.6 | Web BFF | 549-561 |
+| **11** | **Test plan** — you need test locations, gates or CI jobs | 562-577 |
+| **12** | **References** — you need operational detail kept out of this file | 578-587 |
 
 ---
 
@@ -160,8 +160,8 @@ name (namespace, env var prefix, headers, cookies, buckets). See `docs/rebrandin
   `project`, `festival`), city, about text, links and avatar. Roles are `owner`, `admin`,
   `editor`, enforced in `users`: any role edits the Page and lists members, owners add,
   change and remove members.
-- Residencies: a Page owner or admin invites an artist; the artist accepts or rejects
-  (`/v1/me/residencies/{id}/accept|reject`).
+- Residencies: only a current Page owner or admin can invite an artist; the role is checked
+  under the account write lock. Artists accept or reject (`/v1/me/residencies/{id}/accept|reject`).
 - Follows target artist profiles, consumer profiles or Pages (`/v1/me/follows`). Event
   follows live in `events`.
 
@@ -275,14 +275,18 @@ name (namespace, env var prefix, headers, cookies, buckets). See `docs/rebrandin
 
 - `DELETE /v1/me` (202) sets the account to `erasure_pending`, deletes sessions and pending
   tokens, and enqueues an `account_erasure_jobs` row in one transaction.
+- The settings flow uses `DELETE /api/me`; 202 acknowledges the durable request, not completed
+  erasure. Lite calls each owning module in-process and resumes persisted jobs after restart,
+  including reclaiming an interrupted job after its lease expires. Media removes the local
+  original and derivatives before deleting their inventory.
 - A background worker in `users` runs stages in order: `social` (anonymize author),
   `events`, `media`, then local data. Failed stages retry with exponential backoff capped at
   one hour. `social`, `events` and `media` write erasure tombstones that fence later writes
   by that owner.
-- Local erasure deletes sessions, tokens, preferences, notifications, blocks, follows,
-  memberships, residencies and key envelopes; clears email, username and credentials; renames
-  the consumer profile to "Deleted User"; removes artist profile and onboarding data; and
-  detaches identifiers from reports and audit logs while keeping the security events.
+- Users serializes relationship writes on the affected accounts and rejects inactive accounts.
+  Erasure removes user follows, not unrelated Page follows with a matching handle. It deletes
+  sessions, tokens, preferences, notifications, blocks, memberships, residencies and key envelopes;
+  clears credentials, identity, artist and onboarding data; anonymizes the consumer profile and retained audits/reports.
 
 ---
 
@@ -367,16 +371,19 @@ The opt-in local backend (`perlimen_lite.main:app`) mounts the four product rout
 `/users`, `/social`, `/events` and `/media` behind the internal token. Users still authenticates
 product sessions. One dedicated PostgreSQL database holds four isolated schemas, each with
 a separate Alembic ledger, migration login and non-owner runtime login. Root readiness checks
-the four heads and the private media directory. This backend does not replace the k3s deployment.
+the four heads and the private media directory. Lite starts neither a NATS broker nor NATS
+clients. The optional Authentik gateway is a separate process, not part of product login.
+This backend does not replace the k3s deployment.
 See [Perlimen Lite backend](docs/perlimen-lite-backend.md) for the local configuration contract.
 
 ### 6.2 Service-to-service transports
 
 | Transport | Flows |
 | --- | --- |
-| In-process owner API (Lite) | Social follows, blocks, mentions and notifications; Events Page roles, artist and user references, guest and update notifications, and city announcements; media asset validation. Each call uses the owner's runtime login |
+| In-process owner API (Lite) | Social follows, blocks, mentions and notifications; Events Page roles, artist and user references, guest and update notifications, and city announcements; media asset validation; account erasure. Each call uses the owner's runtime login |
 | NATS request/reply (standalone) | `users.current_profile.v1` (auth-gateway → users), `users.follow.list_following.v1` (social → users) |
 | NATS pub/sub (standalone) | `users.block.changed.v1` (users → social) |
+| Private HTTP (optional Lite gateway) | `POST /users/internal/v1/operator-identity` with `X-Threshold-Internal-Token`; confirms verified operator claims without a database lookup or write |
 | HTTP `/internal/v1/*` with `X-Threshold-Internal-Token` | Standalone cross-service calls and integrations not moved in-process: Page roles and artist lookups (events → users), notifications and mention lookups, event announcements (events → social), account erasure (users → social/events/media), media asset validation |
 
 The BFF sends `social`, `events` and `media` the internal token and session-derived identity
@@ -409,6 +416,8 @@ the BFF also sends the internal token to the pinned loopback `/users` endpoint w
 - Check-in tokens are short-lived, opaque, single-use and stored hashed (§3.7).
 - Media uploads are streamed with byte, header and part limits before decoding (§3.8).
 - Authentik serves operator/admin SSO only; `auth-gateway` validates its JWTs via JWKS.
+  Lite HTTP mode requires an expiring bearer for a dedicated admin audience. An operator-only
+  Authentik policy must restrict issuance; audience validation does not check group membership.
 - CI: Gitleaks and Trivy run in the `security` job; `go-task repo:secret-scan` runs locally.
   Untrusted pull-request jobs carry no publication credentials.
 
@@ -421,7 +430,7 @@ the BFF also sends the internal token to the pinned loopback `/users` endpoint w
 - Public identity is the username; there are no public real-name fields for people.
 - Auth audit logs store keyed hashes of subject, IP and user agent, not raw values.
 - Account erasure (§3.12) deletes or anonymizes personal data across all four data services
-  while keeping public thread integrity (authors become "Deleted User").
+  while keeping public thread integrity (authors become unlinked "Deleted User" labels).
 - Backups: each CNPG cluster archives WAL and takes daily base backups through the Barman
   Cloud plugin with 14-day retention. Host-level backups are described in
   `docs/runbooks/backup-restore.md`.
@@ -490,7 +499,8 @@ appropriate.
   `POST /v1/notifications/{id}/read`, `POST /v1/notifications/read-all`,
   `GET|PUT /v1/notifications/preferences`.
 - Safety: `POST /v1/reports`, `GET /v1/moderation/reports`, `GET /v1/safety/audit-log`.
-- Internal: `current-profile`, `users/{id}/onboarding-preferences`, `pages/organizer-refs`,
+- Internal: `current-profile` (standalone only), `users/{id}/onboarding-preferences`,
+  `pages/organizer-refs`,
   `users/active-refs`, `pages/{page_id}/members/{user_id}`, `blocks`,
   `users/{blocker}/blocks/{blocked}`, `mention-targets/profiles|pages/{handle}`,
   `artist-profiles/{id}`, `artist-profiles/batch`, `notifications`.
@@ -530,11 +540,15 @@ appropriate.
 - media: `POST /v1/assets`, `POST /v1/assets/upload`, `GET /v1/config/storage`,
   `GET /internal/v1/assets/{asset_id}`, `POST /internal/v1/account-erasure`,
   `GET /media/assets/{asset_path}` (paths must start with `assets/`; no `.`/`..` segments).
-- auth-gateway: `GET /me` (Authentik bearer token → current profile via NATS), plus health.
+- auth-gateway: `GET /me` plus health. Standalone resolves the current profile over NATS.
+  The optional Lite gateway confirms verified Authentik claims via private HTTP and returns only
+  `status`, `subject`, `email` and `username`. It creates or links no product profile, reserves
+  no username or email, and issues no product session or role. Public product lookup does not
+  find the operator identity; ordinary registration can use the same username and email.
 
 ### 10.6 Web BFF
 
-Route handlers in `apps/web/src/app/api/`: `auth/*`, `me` (`profile`, `artist`),
+Route handlers in `apps/web/src/app/api/`: `auth/*`, `me` (`DELETE` for erasure, `profile`, `artist`),
 `onboarding`, `follow`, `blocks`, `reports`, `notifications/*`, `pages/*`,
 `search/mentions`, `media/assets` (upload and `[...path]` proxy), `events/*` (event CRUD,
 updates, follow, boost, viewer context, guestlist, quotas, QR token, door staff, check-in) and

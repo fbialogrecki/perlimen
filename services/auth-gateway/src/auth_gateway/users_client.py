@@ -10,7 +10,7 @@ from perlimen_common.otel_nats import inject_trace_context
 
 
 class UsersProfileClientError(RuntimeError):
-    """Raised when auth-gateway cannot fetch the application profile."""
+    """Raised when the downstream Users request fails."""
 
 
 class UsersProfileClient:
@@ -43,31 +43,28 @@ class UsersProfileClient:
             "email": email,
             "username": username,
         }
-        if self.transport == "nats":
-            return await self._current_profile_nats(payload)
-        return await self._current_profile_http(payload)
+        return await self._current_profile_nats(payload)
 
-    async def _current_profile_http(self, payload: dict[str, Any]) -> dict[str, Any]:
+    async def confirm_operator_identity(self, identity: dict[str, str | None]) -> None:
         if not self.internal_token:
-            raise UsersProfileClientError("users profile HTTP transport is not configured")
+            raise UsersProfileClientError("operator identity HTTP transport is not configured")
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds, trust_env=False) as client:
                 response = await client.post(
-                    f"{self.base_url}/internal/v1/current-profile",
+                    f"{self.base_url}/internal/v1/operator-identity",
                     headers={"X-Threshold-Internal-Token": self.internal_token},
-                    json=payload,
+                    json=identity,
                 )
                 response.raise_for_status()
         except httpx.HTTPError:
-            raise UsersProfileClientError("users profile HTTP request failed") from None
+            raise UsersProfileClientError("operator identity HTTP request failed") from None
 
         try:
             data = response.json()
         except ValueError:
-            raise UsersProfileClientError("users profile response is invalid") from None
-        if not isinstance(data, dict):
-            raise UsersProfileClientError("users profile response is invalid")
-        return data
+            raise UsersProfileClientError("operator identity response is invalid") from None
+        if data != identity:
+            raise UsersProfileClientError("operator identity response is invalid")
 
     async def _current_profile_nats(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not self.nats_url:

@@ -12,7 +12,7 @@ Current scope:
 - Authentik JWKS/JWT validation
 - user context propagation
 - standalone: NATS request/reply to `users.current_profile.v1`
-- optional Lite gateway: HTTP `POST /users/internal/v1/current-profile`
+- optional Lite gateway: HTTP `POST /users/internal/v1/operator-identity`
 
 Intended boundary:
 
@@ -33,8 +33,15 @@ an isolated issuer. Do not expose it through the product BFF.
 | `THRESHOLD_AUTHENTIK_ISSUER` and `THRESHOLD_AUTHENTIK_JWKS_URL` | Issuer and signing keys of the operator-only application |
 | `THRESHOLD_AUTHENTIK_AUDIENCE` | The dedicated admin application's expected `aud` value (required in HTTP mode) |
 
-Restrict access in the identity provider to the intended operators before using that
-audience. The existing profile endpoint maps by Authentik subject; use distinct synthetic
-email addresses and usernames rather than trying to link product accounts. The response
-does not establish a product session or authorize product moderation. Standalone deployment
-configuration and the legacy NATS transport are unchanged.
+Use a dedicated Authentik application/provider, not a client or audience shared with any
+other application. Require an operator-only application policy that denies non-operators
+before token issuance. Check with both an allowed operator and a non-operator in the isolated
+IdP before enabling the gateway; keep the gateway off if either result is wrong. The gateway
+verifies signature, issuer, expiry and audience; a matching `aud` proves the target application,
+not group membership. Access policy is enforced at issuance, not rechecked on each `/me` call.
+
+`GET /me` confirms the verified `subject`, `email` and `username` over the private token-guarded
+Lite route and returns those fields with `status: authenticated`. It never forwards the bearer,
+sets cookies, writes product data or confers product permissions. The same email and username
+remain available for ordinary registration. Standalone deployment configuration and the legacy
+NATS profile contract are unchanged.
