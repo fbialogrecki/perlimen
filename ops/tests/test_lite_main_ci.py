@@ -1,7 +1,14 @@
+import importlib.util
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from ci.lite import verify_main_ci as gate
+spec = importlib.util.spec_from_file_location(
+    "lite_main_ci", Path(__file__).resolve().parents[2] / "ci/lite/verify_main_ci.py"
+)
+assert spec is not None and spec.loader is not None
+gate = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gate)
 
 SHA = "a" * 40
 RUNS = f"workflows/ci.yml/runs?event=push&branch=main&head_sha={SHA}&per_page=100"
