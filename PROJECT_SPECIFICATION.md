@@ -139,8 +139,8 @@ name (namespace, env var prefix, headers, cookies, buckets). See `docs/rebrandin
   and `/api/auth` at the BFF. Both cookies are HttpOnly, SameSite=Lax, and Secure when configured.
 - Email verification tokens expire after 24 hours, password reset tokens after 30 minutes.
   Tokens are never returned to the browser. Email is sent over SMTP when enabled; plaintext
-  SMTP is refused outside `local`/`test` environments. The cluster config targets Resend over
-  STARTTLS.
+  SMTP is refused outside `local`/`test` environments. Standalone email links use HTTPS. Lite
+  leaves SMTP off by default; opt-in loopback capture uses the actual local web origin in links.
 - Auth endpoints are rate limited per client IP and per subject (default 120 attempts per
   60 s); auth events are written to `auth_audit_logs` with keyed hashes of subject, IP and
   user agent.

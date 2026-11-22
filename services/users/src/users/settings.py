@@ -1,3 +1,4 @@
+import re
 from typing import Literal, Self
 
 from pydantic import Field, field_validator, model_validator
@@ -50,6 +51,22 @@ class Settings(ServiceSettings):
     smtp_ca_file: str | None = None
     smtp_from: str = "no-reply@example.test"
     web_host: str = "127.0.0.1:3000"
+
+    @property
+    def web_origin(self) -> str:
+        return self.web_host if "://" in self.web_host else f"https://{self.web_host}"
+
+    @model_validator(mode="after")
+    def restrict_explicit_web_origin(self) -> Self:
+        if "://" in self.web_host:
+            loopback = re.fullmatch(r"http://127\.0\.0\.1:([1-9][0-9]{3,4})", self.web_host)
+            if (
+                self.environment.lower() not in {"local", "test"}
+                or loopback is None
+                or not 1024 <= int(loopback[1]) <= 65535
+            ):
+                raise ValueError("use a web host without a scheme, or a local loopback HTTP origin")
+        return self
 
     @model_validator(mode="after")
     def restrict_plaintext_smtp(self) -> Self:

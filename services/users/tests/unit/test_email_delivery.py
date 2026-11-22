@@ -3,6 +3,7 @@ import logging
 import smtplib
 from unittest.mock import MagicMock, call, patch
 
+import pytest
 from sqlalchemy.orm import Session
 from users.auth.service import (
     _send_email,
@@ -15,6 +16,17 @@ from users.settings import Settings
 RECIPIENT = "private-recipient@example.com"
 SUBJECT = "Private subject"
 BODY = "https://app.example.test/reset-password?token=secret-token"
+
+
+@pytest.fixture(
+    params=[
+        ("production", "app.example.test", "https://app.example.test"),
+        ("test", "http://127.0.0.1:59500", "http://127.0.0.1:59500"),
+    ]
+)
+def mail_link_config(request):
+    environment, host, origin = request.param
+    return Settings(smtp_enabled=False, environment=environment, web_host=host), origin
 
 
 def _smtp_settings(**overrides) -> Settings:
@@ -171,8 +183,8 @@ def test_smtp_failure_log_excludes_message_fields_credentials_and_exception(capl
         assert secret not in caplog.text
 
 
-def test_registration_triggers_email(session: Session):
-    settings = Settings(smtp_enabled=False, web_host="app.example.test")
+def test_registration_triggers_email(session: Session, mail_link_config):
+    settings, origin = mail_link_config
 
     with patch("users.auth.service._send_email") as mock_send:
         register_user(
@@ -188,11 +200,11 @@ def test_registration_triggers_email(session: Session):
         _, kwargs = mock_send.call_args
         assert kwargs["recipient"] == "new@example.com"
         assert kwargs["subject"] == "Verify your email address"
-        assert "/verify-email?token=" in kwargs["body"]
+        assert f"\n{origin}/verify-email?token=" in kwargs["body"]
 
 
-def test_request_verification_triggers_email(session: Session):
-    settings = Settings(smtp_enabled=False, web_host="app.example.test")
+def test_request_verification_triggers_email(session: Session, mail_link_config):
+    settings, origin = mail_link_config
     user, _, _, _ = register_user(
         session=session,
         settings=settings,
@@ -209,11 +221,11 @@ def test_request_verification_triggers_email(session: Session):
         _, kwargs = mock_send.call_args
         assert kwargs["recipient"] == "verify@example.com"
         assert kwargs["subject"] == "Verify your email address"
-        assert "/verify-email?token=" in kwargs["body"]
+        assert f"\n{origin}/verify-email?token=" in kwargs["body"]
 
 
-def test_request_password_reset_triggers_email(session: Session):
-    settings = Settings(smtp_enabled=False, web_host="app.example.test")
+def test_request_password_reset_triggers_email(session: Session, mail_link_config):
+    settings, origin = mail_link_config
     register_user(
         session=session,
         settings=settings,
@@ -230,4 +242,4 @@ def test_request_password_reset_triggers_email(session: Session):
         _, kwargs = mock_send.call_args
         assert kwargs["recipient"] == "reset@example.com"
         assert kwargs["subject"] == "Reset your password"
-        assert "/reset-password?token=" in kwargs["body"]
+        assert f"\n{origin}/reset-password?token=" in kwargs["body"]

@@ -48,8 +48,11 @@ token only to `http://127.0.0.1:<port>/users` and never follow redirects. The
 standalone users service does not use this mode. The launcher sets `NEXTAUTH_URL`
 to the loopback web origin for the exact Origin check and absolute Open Graph
 image URLs. This variable does not enable Authentik or any other login provider.
-The default launch leaves SMTP disabled: verify mail delivery separately against
-a disposable instance with a loopback-only SMTP sink.
+SMTP is off by default. For synthetic accounts on a disposable checkout only,
+set `PERLIMEN_LITE_SMTP_CAPTURE_PORT` at start to the port of a non-relaying SMTP
+sink bound to `127.0.0.1`. Lite uses no SMTP credentials and builds both reset
+and verification links from the Next.js origin, including the selected web port.
+Stop before changing this setting. Never forward captured mail or use real accounts.
 
 On a **fresh disposable checkout** containing both changes, run
 `bash ops/tests/lite-smoke.sh --disposable` (requires `python3`). It checks
@@ -58,3 +61,16 @@ login through Next.js. A second start preserves the running PID, and login
 returns the same account after stop/start. The test checks listener/cgroup
 cleanup and leaves the isolated volume stopped, not deleted. It does not test
 browser cookie handling, refresh rotation or media uploads.
+
+For the reset regression, use a separate fresh disposable checkout with locked web
+dependencies and a Python environment with Playwright and its Chromium installed:
+
+```bash
+python -m playwright install chromium
+python ops/tests/lite-reset-smoke.py --disposable
+```
+
+The test supplies an in-memory loopback SMTP sink, starts Lite on a nondefault
+web port, opens the exact mailed link in Chromium, submits the real reset form,
+and verifies single use, session revocation and login with the new password.
+It stops the stack and leaves its disposable database stopped, not deleted.

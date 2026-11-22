@@ -23,3 +23,17 @@ def test_smtp_timeout_is_positive_and_bounded(timeout: float):
 def test_smtp_security_rejects_legacy_boolean_values():
     with pytest.raises(ValidationError):
         Settings(smtp_security=True)
+
+
+@pytest.mark.parametrize(
+    ("environment", "host"),
+    [
+        ("production", "http://127.0.0.1:3300"),
+        ("local", "http://app.example.test:3300"),
+        ("local", "http://127.0.0.1:3300/path"),
+        ("local", "http://127.0.0.1:99999"),
+    ],
+)
+def test_explicit_mail_origin_requires_local_loopback(environment: str, host: str):
+    with pytest.raises(ValidationError, match="local loopback HTTP origin"):
+        Settings(environment=environment, web_host=host)
