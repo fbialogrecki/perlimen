@@ -1,0 +1,10 @@
+[Unit]
+Description=Reconcile the isolated Perlimen Lite target with GitHub Actions CI
+
+[Service]
+Type=oneshot
+UMask=0077
+StateDirectory=perlimen-lite-pull
+StateDirectoryMode=0700
+TimeoutStartSec=25min
+ExecStart=/usr/bin/python3 -I %h/.local/lib/perlimen-lite-pull/pull_main.py --state ${STATE_DIRECTORY} poll

@@ -115,6 +115,100 @@ through the web BFF at every stage. It stops the transient unit and removes the
 checkout; the private synthetic state directory printed at startup stays stopped.
 This is not a permanent deployment mechanism or a replacement for legacy CI/CD.
 
+## Automatic Lite deployment (dedicated NUC account)
+
+The optional user timer polls the public Perlimen repository every five minutes.
+It considers only the observed `main` tip, then requires the existing GitHub
+Actions workflow's successful **main-push** `ci-ok` for that exact SHA and run
+attempt. That gate includes the security scans; a green PR, incomplete run,
+replaced tip or unreadable GitHub response cannot authorize promotion. There is
+no new GitHub workflow, webhook, runner, deployment credential, or change to
+Woodpecker, Harbor or Argo CD. Intermediate pushes can be superseded.
+
+### Coordinator setup
+
+- Use a dedicated, unprivileged account with private home, its own rootless
+  Podman/subuid/subgid configuration, and the dependencies listed above. Do not
+  grant sudo, k3s or legacy access, or install SSH/GitHub keys, registry secrets,
+  a credential helper or a shared service socket. The user manager needs to stay
+  up across logouts and reboots; the host operator can enable lingering for
+  this account. The host needs outbound access for public GitHub and the locked
+  dependency/image downloads, but no public or LAN listener or tunnel.
+- Reserve **13300 (Web), 13800 (API), 15432 (PostgreSQL)** on loopback. Verify all
+  three are free before first start. Use only synthetic data. Do not reuse any
+  existing checkout, credentials, database or media directories.
+- Stage the following four files from a reviewed, successfully checked **merged
+  main** revision. Run these commands as the dedicated account from the staged
+  tree. Install trusted control files outside the managed checkout and update
+  them only from another reviewed merged revision while intake is stopped.
+
+```bash
+install -d -m 0700 "$HOME/.local/lib/perlimen-lite-pull" "$HOME/.config/systemd/user"
+install -m 0600 ci/lite/{pull_main,verify_main_ci}.py "$HOME/.local/lib/perlimen-lite-pull/"
+install -m 0600 ops/systemd/perlimen-lite-pull.{service,timer} "$HOME/.config/systemd/user/"
+systemctl --user daemon-reload
+systemctl --user enable --now perlimen-lite-pull.timer
+systemctl --user list-timers perlimen-lite-pull.timer
+journalctl --user -u perlimen-lite-pull.service -e
+```
+
+On first eligible poll the controller creates a checkout and fresh Lite store.
+Subsequent polls retain the same checkout path (and therefore the same private
+PostgreSQL/media store). No two polls or rollbacks run concurrently. The
+controller records current/previous SHA and CI run, attempt and job IDs in
+`release.json` under the private `perlimen-lite-pull` state directory. It records
+success only after checking loopback listener PIDs and cgroup, the running
+checkout SHA, Web `/` and API `/readyz`. Synthetic BFF login is a separate
+operator acceptance check, not part of each poll.
+
+### Verify, roll back and stop
+
+Use the same dedicated account and systemd user environment (commands in Bash):
+
+```bash
+ctl="$HOME/.local/lib/perlimen-lite-pull/pull_main.py"
+state="$(systemd-path user-state-private)/perlimen-lite-pull"
+python3 -I "$ctl" --state "$state" status
+python3 -I "$ctl" --state "$state" rollback
+python3 -I "$ctl" --state "$state" status
+```
+
+`rollback` takes the previous recorded healthy SHA, rechecks compatibility and
+holds automatic promotion **before** the switch. `status` must report that SHA
+in both the record and the live check; verify the same synthetic account still
+works. On first deployment there is no previous SHA. If a candidate fails health
+or is interrupted, the prior committed release remains authoritative; the next
+poll restores it if necessary without consulting GitHub, and does not retry the
+failed SHA. Recovery still needs the installed toolchain, dependency cache and
+local PostgreSQL image (or access to download missing artifacts).
+A rollback hold survives restarts; it still lets the timer restore the held
+release. After triage, lift the hold with:
+
+```bash
+python3 -I "$ctl" --state "$state" resume
+```
+
+The next poll may redeploy the same `main` tip if it is still eligible and was
+rolled back manually rather than blocked by a failed activation. To take this
+target offline, disable the timer, stop any active poll, then stop the Lite
+unit through the controller:
+
+```bash
+systemctl --user disable --now perlimen-lite-pull.timer
+systemctl --user stop perlimen-lite-pull.service
+python3 -I "$ctl" --state "$state" stop
+```
+
+The stop keeps both the release record and the checkout-specific Lite data and
+credentials. Do not edit the checkout or release record in place. There is
+brief downtime during a switch; this is a single loopback target, not a
+production Next build, sandbox for untrusted code, or high-availability service.
+Migration/schema inputs, launcher and lock/dependency inputs must match the
+known release in both directions. A change to those inputs needs separate
+qualification on a fresh isolated target; never force a switch, downgrade the
+DB, or delete the existing store. Application data is not restored to a point in
+time by a code rollback.
+
 ## Paired backup and restore rehearsal
 
 Use two dedicated loopback-only Lite PostgreSQL 17 instances, separate volumes,
