@@ -37,7 +37,7 @@ Keep this map correct: line ranges shift whenever content is added or removed.
 | --- | --- | --- |
 | **1** | **Specification governance** — changing anything in this file | 80-90 |
 | **2** | **Vision and scope** — you need product framing or the MVP boundary | 91-109 |
-| **3** | **Functional requirements** — changing product behavior | 110-285 |
+| **3** | **Functional requirements** — changing product behavior | 110-288 |
 | 3.1 | Access model and web routes | 112-128 |
 | 3.2 | Accounts and authentication | 129-149 |
 | 3.3 | Identity, profiles, Pages and follows | 150-167 |
@@ -45,35 +45,35 @@ Keep this map correct: line ranges shift whenever content is added or removed.
 | 3.5 | Feed | 179-192 |
 | 3.6 | Events | 193-209 |
 | 3.7 | Guestlists and check-in | 210-226 |
-| 3.8 | Media | 227-239 |
-| 3.9 | Notifications | 240-248 |
-| 3.10 | Search and mentions | 249-257 |
-| 3.11 | Safety: blocks, reports, moderation | 258-270 |
-| 3.12 | Account erasure | 271-285 |
-| **4** | **Non-functional requirements** — touching limits, i18n, observability, health | 286-303 |
-| **5** | **System context** — you need the repo layout or the ownership split | 304-342 |
-| 5.1 | Repository layout | 306-326 |
-| 5.2 | Service ownership | 327-342 |
-| **6** | **Architecture** — touching runtime, service transports, CI/CD or GitOps | 343-395 |
-| 6.1 | Runtime | 345-369 |
-| 6.2 | Service-to-service transports | 370-382 |
-| 6.3 | Build, publication and deployment | 383-395 |
-| **7** | **Security** — touching auth, trust boundaries, secrets or headers | 396-413 |
-| **8** | **Privacy and data retention** — touching personal data, deletion or backups | 414-427 |
-| **9** | **Data model** — changing tables or migrations | 428-464 |
-| 9.1 | users | 433-443 |
-| 9.2 | social | 444-449 |
-| 9.3 | events | 450-457 |
-| 9.4 | media | 458-464 |
-| **10** | **API contract** — adding or changing an endpoint | 465-544 |
-| 10.1 | Conventions | 467-472 |
-| 10.2 | users | 473-494 |
-| 10.3 | social | 495-508 |
-| 10.4 | events | 509-524 |
-| 10.5 | media and auth-gateway | 525-531 |
-| 10.6 | Web BFF | 532-544 |
-| **11** | **Test plan** — you need test locations, gates or CI jobs | 545-560 |
-| **12** | **References** — you need operational detail kept out of this file | 561-570 |
+| 3.8 | Media | 227-242 |
+| 3.9 | Notifications | 243-251 |
+| 3.10 | Search and mentions | 252-260 |
+| 3.11 | Safety: blocks, reports, moderation | 261-273 |
+| 3.12 | Account erasure | 274-288 |
+| **4** | **Non-functional requirements** — touching limits, i18n, observability, health | 289-306 |
+| **5** | **System context** — you need the repo layout or the ownership split | 307-345 |
+| 5.1 | Repository layout | 309-329 |
+| 5.2 | Service ownership | 330-345 |
+| **6** | **Architecture** — touching runtime, service transports, CI/CD or GitOps | 346-398 |
+| 6.1 | Runtime | 348-372 |
+| 6.2 | Service-to-service transports | 373-385 |
+| 6.3 | Build, publication and deployment | 386-398 |
+| **7** | **Security** — touching auth, trust boundaries, secrets or headers | 399-416 |
+| **8** | **Privacy and data retention** — touching personal data, deletion or backups | 417-430 |
+| **9** | **Data model** — changing tables or migrations | 431-467 |
+| 9.1 | users | 436-446 |
+| 9.2 | social | 447-452 |
+| 9.3 | events | 453-460 |
+| 9.4 | media | 461-467 |
+| **10** | **API contract** — adding or changing an endpoint | 468-547 |
+| 10.1 | Conventions | 470-475 |
+| 10.2 | users | 476-497 |
+| 10.3 | social | 498-511 |
+| 10.4 | events | 512-527 |
+| 10.5 | media and auth-gateway | 528-534 |
+| 10.6 | Web BFF | 535-547 |
+| **11** | **Test plan** — you need test locations, gates or CI jobs | 548-563 |
+| **12** | **References** — you need operational detail kept out of this file | 564-573 |
 
 ---
 
@@ -234,8 +234,11 @@ name (namespace, env var prefix, headers, cookies, buckets). See `docs/rebrandin
 - `media` stores the original at `assets/{id}/original` and WebP derivatives at
   `assets/{id}/{variant}.webp`: `avatar_512`/`avatar_256` (square crop) for avatars,
   `post_1280`/`post_480` for post images and posters. Only `media` creates object keys.
-- Images are served same-origin through `/api/media/assets/[...path]`, which proxies
-  `media` `GET /media/assets/{path}`.
+- Images are served same-origin through `/api/media/assets/[...path]`. In Lite, reads are
+  uncached and never serve originals: owners can preview, visible post attachments require
+  an unblocked session, and linked public avatars and event posters remain anonymous-readable.
+- Lite writes private local blobs without S3. Upload success retains the asset and derivative
+  metadata with logical keys, never host paths; internal erasure deletes originals and derivatives.
 
 ### 3.9 Notifications
 
@@ -371,7 +374,7 @@ See [Perlimen Lite backend](docs/perlimen-lite-backend.md) for the local configu
 
 | Transport | Flows |
 | --- | --- |
-| In-process owner API (Lite) | Social follows, blocks, mentions and notifications; Events Page roles, artist and user references, guest and update notifications, and city announcements. Each call uses the owner's runtime login |
+| In-process owner API (Lite) | Social follows, blocks, mentions and notifications; Events Page roles, artist and user references, guest and update notifications, and city announcements; media asset validation. Each call uses the owner's runtime login |
 | NATS request/reply (standalone) | `users.current_profile.v1` (auth-gateway → users), `users.follow.list_following.v1` (social → users) |
 | NATS pub/sub (standalone) | `users.block.changed.v1` (users → social) |
 | HTTP `/internal/v1/*` with `X-Threshold-Internal-Token` | Standalone cross-service calls and integrations not moved in-process: Page roles and artist lookups (events → users), notifications and mention lookups, event announcements (events → social), account erasure (users → social/events/media), media asset validation |
