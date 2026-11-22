@@ -13,6 +13,8 @@ from fcntl import LOCK_EX, LOCK_NB, flock
 from http.client import HTTPConnection, HTTPException
 from pathlib import Path
 from select import select
+from shlex import quote
+from shutil import which
 from tempfile import NamedTemporaryFile, mkdtemp
 from time import monotonic, sleep
 from typing import TypedDict
@@ -70,9 +72,26 @@ def isolated_runtime(ports: tuple[int, ...], command: list[str]) -> int:
     require(os.geteuid() != 0, "Use the dedicated rootless account")
     require(len(ports) == len(set(ports)) == 3, "Expected three distinct ports")
     require(all(1024 <= port <= 65535 for port in ports), "Invalid runtime port")
-    state = Path(os.environ["STATE_DIRECTORY"])
     runtime = Path(os.environ["RUNTIME_DIRECTORY"])
-    namespaces = ["--net"]
+    podman = which("podman")
+    if podman is None:
+        raise RuntimeError("Missing local Podman")
+    podman_runtime = runtime / "podman"
+    podman_runtime.mkdir(mode=0o700)
+    config = podman_runtime / "containers.conf"
+    config.write_text('[engine]\nlock_type = "file"\n')
+    # The checkout launcher scrubs the environment. Restore the mapped host IDs
+    # and private Podman settings at the CLI boundary, even for old checkouts.
+    cli = podman_runtime / "podman"
+    cli.write_text(
+        "#!/bin/sh\n"
+        f"export _CONTAINERS_ROOTLESS_UID={os.geteuid()} _CONTAINERS_ROOTLESS_GID={os.getegid()}\n"
+        f"export XDG_RUNTIME_DIR={quote(str(podman_runtime))} "
+        f"CONTAINERS_CONF_OVERRIDE={quote(str(config))}\n"
+        f"exec {quote(os.path.abspath(podman))} "
+        f"--tmpdir {quote(str(podman_runtime / 'tmp'))} \"$@\"\n"
+    )
+    cli.chmod(0o700)
     dns_options = []
     resolver = Path("/etc/resolv.conf").resolve()
     if resolver == Path("/run/systemd/resolve/stub-resolv.conf"):
@@ -82,7 +101,6 @@ def isolated_runtime(ports: tuple[int, ...], command: list[str]) -> int:
         conf.write_text(
             resolver.read_text().replace("nameserver 127.0.0.53", f"nameserver {guest_dns}")
         )
-        namespaces += ["--mount"]
         dns_options = ["--dns-forward", guest_dns, "--dns-host", "127.0.0.53"]
         command = [
             "bash",
@@ -104,15 +122,11 @@ def isolated_runtime(ports: tuple[int, ...], command: list[str]) -> int:
         require(not listeners(port), f"Host port {port} is occupied")
     with subprocess.Popen(
         [
-            "podman",
-            "--remote=false",
-            "--root",
-            str(state / "containers"),
-            "--runroot",
-            str(runtime / "containers"),
             "unshare",
-            "unshare",
-            *namespaces,
+            "--map-root-user",
+            "--map-auto",
+            "--net",
+            "--mount",
             "bash",
             "-p",
             "-c",
@@ -122,6 +136,10 @@ def isolated_runtime(ports: tuple[int, ...], command: list[str]) -> int:
         ],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
+        env=os.environ | {
+            "PATH": f"{podman_runtime}:{os.environ['PATH']}",
+            "_CONTAINERS_USERNS_CONFIGURED": "done",
+        },
         text=True,
     ) as inner:
         assert inner.stdin is not None and inner.stdout is not None
@@ -135,11 +153,12 @@ def isolated_runtime(ports: tuple[int, ...], command: list[str]) -> int:
 
         handler = signal.signal(signal.SIGTERM, stopping)
         try:
-            require(select([inner.stdout], [], [], 10)[0], "No private namespace from Podman")
+            require(select([inner.stdout], [], [], 10)[0], "No private user/network namespace")
             raw_pid = inner.stdout.readline().strip()
             require(raw_pid.isascii() and raw_pid.isdecimal(), "No private namespace PID")
-            namespace = Path(f"/proc/{raw_pid}/ns/net").readlink()
-            require(namespace != Path("/proc/self/ns/net").readlink(), "No network isolation")
+            for ns, kind in (("net", "network"), ("user", "user"), ("mnt", "mount")):
+                namespace = Path(f"/proc/{raw_pid}/ns/{ns}").readlink()
+                require(namespace != Path(f"/proc/self/ns/{ns}").readlink(), f"No {kind} isolation")
             pid = int(raw_pid)
             forward = "127.0.0.1/" + ",".join(map(str, ports))
             proxy = subprocess.Popen(
@@ -150,6 +169,7 @@ def isolated_runtime(ports: tuple[int, ...], command: list[str]) -> int:
                     "--config-net",
                     "--host-lo-to-ns-lo",
                     "--no-map-gw",
+                    "--no-netns-quit",  # The controller, not a procfs watch, owns the proxy.
                     *dns_options,
                     "-t",
                     forward,
