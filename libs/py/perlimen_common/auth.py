@@ -40,11 +40,13 @@ class JwtVerifier:
         jwks_url: str | None,
         audience: str | None = None,
         algorithms: tuple[str, ...] = ("RS256",),
+        require_expiration: bool = False,
     ) -> None:
         self.issuer = issuer
         self.jwks_url = jwks_url
         self.audience = audience
         self.algorithms = algorithms
+        self.require_expiration = require_expiration
         self._jwks_client: PyJWKClient | None = None
 
     def _client(self) -> PyJWKClient:
@@ -60,7 +62,10 @@ class JwtVerifier:
 
         try:
             signing_key = self._client().get_signing_key_from_jwt(token)
-            options: Any = {"verify_aud": bool(self.audience)}
+            options: Any = {
+                "verify_aud": bool(self.audience),
+                "require": ["exp"] if self.require_expiration else [],
+            }
             claims = jwt.decode(
                 token,
                 signing_key.key,

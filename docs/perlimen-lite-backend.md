@@ -74,6 +74,29 @@ Owner writes are fenced by the persisted tombstones; Social retains the discussi
 replies with anonymous attribution, not a link to a profile. No extra worker or HTTP hop is
 needed. The flow covers the active database and media directory, not earlier copies.
 
+## Broker and operator SSO
+
+Lite runs no NATS broker, enables no NATS clients, and does not load the standalone service
+lifespans. The standalone NATS clients and deployment stay in place:
+
+| NATS subject | Standalone client and handler | Lite path |
+| --- | --- | --- |
+| `users.current_profile.v1` | auth-gateway request → Users responder | Not used. The optional gateway confirms operator identity via `POST /users/internal/v1/operator-identity` with the internal token |
+| `users.follow.list_following.v1` | Social request → Users responder | Social reads the canonical follows through the Users owner API |
+| `users.block.changed.v1` | Users publisher → Social subscriber (standalone also repairs via HTTP) | Social reads canonical blocks through the Users owner API; no projection or repair loop |
+
+Events, Media and the web BFF use no NATS client. `nats-box` and NATS monitoring belong to the
+legacy cluster, not the Lite launcher.
+
+Product email/password sessions work without Authentik or the gateway. If run separately for
+operator SSO, the gateway accepts an Authentik bearer for the dedicated admin audience, not a
+product cookie. An operator-only Authentik policy must restrict token issuance; `aud` identifies
+the intended application, not a user's membership in a group. The private Lite handler has no
+database dependency. The gateway returns only the verified operator identity and does not
+create or link a product account, reserve names, issue sessions or grant product roles. The
+legacy profile-writing endpoint is not mounted in Lite.
+See [auth-gateway configuration](../services/auth-gateway/README.md#optional-lite-configuration).
+
 ## Media
 
 Lite reuses the bounded upload and WebP pipeline. Store the media root outside the checkout
@@ -102,6 +125,8 @@ PERLIMEN_LITE_TEST_FRESH_POSTGRES=1 uv run --frozen python -m pytest -q perlimen
 
 The test rejects an already populated schema, runs the migration CLI twice,
 checks own-schema access and sibling/DDL denials, then exercises the composed app. It
+checks operator SSO against a synthetic loopback JWKS and private Lite HTTP, then
+registers the same username and email as an ordinary product account. It also
 compares SQL query counts for one versus multiple Feed posts and checks that the canonical
 block takes effect immediately with no Social projection table.
 It also verifies announcement replay and races two authorized scans on separate PostgreSQL

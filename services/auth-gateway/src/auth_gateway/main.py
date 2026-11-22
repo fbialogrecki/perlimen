@@ -1,7 +1,7 @@
 import logging
 from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Response
 
 from auth_gateway.settings import Settings
 from auth_gateway.users_client import UsersProfileClient, UsersProfileClientError
@@ -21,11 +21,14 @@ configure_logging()
 configure_telemetry(settings.service_name)
 logger = logging.getLogger(__name__)
 
-jwt_verifier = JwtVerifier(
-    issuer=settings.authentik_issuer,
-    jwks_url=settings.authentik_jwks_url,
-    audience=settings.authentik_audience,
-)
+
+def _build_jwt_verifier(config: Settings) -> JwtVerifier:
+    return JwtVerifier(
+        issuer=config.authentik_issuer,
+        jwks_url=config.authentik_jwks_url,
+        audience=config.authentik_audience,
+        require_expiration=config.users_transport == "http",
+    )
 
 
 def _build_users_profile_client(config: Settings) -> UsersProfileClient:
@@ -40,6 +43,7 @@ def _build_users_profile_client(config: Settings) -> UsersProfileClient:
     )
 
 
+jwt_verifier = _build_jwt_verifier(settings)
 users_profile_client = _build_users_profile_client(settings)
 
 app = FastAPI(title="Perlimen auth-gateway", version="0.1.0")
@@ -58,7 +62,9 @@ async def readyz() -> dict[str, str]:
 
 
 @app.get("/me")
-async def me(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+async def me(
+    response: Response, authorization: str | None = Header(default=None)
+) -> dict[str, Any]:
     try:
         token = require_bearer_token(authorization)
         principal = jwt_verifier.verify(token)
@@ -66,6 +72,21 @@ async def me(authorization: str | None = Header(default=None)) -> dict[str, Any]
         raise HTTPException(status_code=401, detail="unauthenticated") from exc
     except AuthConfigurationError as exc:
         raise HTTPException(status_code=503, detail="auth validation is not configured") from exc
+
+    identity = {
+        "subject": principal.subject,
+        "email": principal.email,
+        "username": principal.username,
+    }
+    if users_profile_client.transport == "http":
+        try:
+            await users_profile_client.confirm_operator_identity(identity)
+        except UsersProfileClientError as exc:
+            raise HTTPException(
+                status_code=503, detail="operator identity service is unavailable"
+            ) from exc
+        response.headers["Cache-Control"] = "no-store"
+        return {"status": "authenticated", **identity}
 
     try:
         profile = await users_profile_client.current_profile(
@@ -79,8 +100,6 @@ async def me(authorization: str | None = Header(default=None)) -> dict[str, Any]
     logger.info("current profile resolved through users service")
     return {
         "status": "authenticated",
-        "subject": principal.subject,
-        "email": principal.email,
-        "username": principal.username,
+        **identity,
         "profile": profile,
     }

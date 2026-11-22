@@ -105,6 +105,7 @@ from users.main_dependencies import get_db_session, settings
 from users.media_client import MediaAssetValidationError, validate_avatar_asset
 
 router = APIRouter()
+standalone_router = APIRouter()
 DbSession = Annotated[Session, Depends(get_db_session)]
 
 SESSION_COOKIE = "threshold_session"
@@ -695,7 +696,7 @@ def _resolve_report_target(
     return target_handle, target_handle
 
 
-@router.post("/internal/v1/current-profile", response_model=CurrentProfileResponse)
+@standalone_router.post("/internal/v1/current-profile", response_model=CurrentProfileResponse)
 def current_profile(
     payload: CurrentPrincipalRequest,
     _: Annotated[None, Depends(require_internal_token)],

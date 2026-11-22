@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException
 from media.api.routes import erase_account_data as erase_media_account
 from media.api.routes import router as media_router
 from media.api.schemas import AccountErasureRequest as MediaErasureRequest
+from pydantic import BaseModel, ConfigDict, Field
 from social.api.routes import anonymize_author
 from social.api.routes import router as social_router
 from social.api.schemas import AnonymizeAuthorRequest
@@ -49,6 +50,14 @@ MODULES: dict[str, tuple[APIRouter, SessionDependency]] = {
     "events": (events_router, events.get_db_session),
     "media": (media_router, media.get_session),
 }
+
+
+class OperatorIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    subject: str = Field(min_length=1)
+    email: str | None = None
+    username: str | None = None
 
 
 def database_session(factory: sessionmaker[Session]) -> SessionDependency:
@@ -148,6 +157,13 @@ def create_app() -> FastAPI:
             router, prefix=f"/{domain}", dependencies=[Depends(require_internal_token)]
         )
         app.dependency_overrides[session] = database_session(factories[domain])
+
+    @app.post(
+        "/users/internal/v1/operator-identity", dependencies=[Depends(require_internal_token)]
+    )
+    def confirm_operator_identity(identity: OperatorIdentity) -> OperatorIdentity:
+        # The gateway verified the bearer. Do not resolve or link a product account here.
+        return identity
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:

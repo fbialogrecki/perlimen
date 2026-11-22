@@ -38,3 +38,15 @@ def test_internal_token_is_required_for_http_transport(monkeypatch) -> None:
         ValidationError, match="internal token is required for HTTP users transport"
     ):
         Settings(users_transport="http")
+
+
+@pytest.mark.parametrize("audience", [None, "", " "])
+def test_admin_audience_is_required_for_http_transport(
+    monkeypatch: pytest.MonkeyPatch, audience: str | None
+) -> None:
+    monkeypatch.setenv("THRESHOLD_INTERNAL_TOKEN", "test-internal-token")
+    with pytest.raises(
+        ValidationError, match="admin audience is required for HTTP users transport"
+    ) as exc:
+        Settings(users_transport="http", authentik_audience=audience)
+    assert "test-internal-token" not in str(exc.value)

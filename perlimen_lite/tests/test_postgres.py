@@ -1,19 +1,28 @@
 """Opt-in integration test. Requires a pristine, disposable Lite Postgres."""
 
+import json
 import os
 import secrets
+import socket
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from io import BytesIO
 from pathlib import Path
 from threading import Barrier
 
+import httpx
+import jwt
+import nats
 import psycopg
 import pytest
 from alembic.script import ScriptDirectory
+from auth_gateway.settings import Settings as GatewaySettings
+from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
+from jwt.algorithms import RSAAlgorithm
 from media.domain.models import AccountErasureTombstone, MediaAsset, MediaDerivative
 from perlimen_lite.database import (
     BOOTSTRAP,
@@ -25,7 +34,7 @@ from perlimen_lite.database import (
     required,
     role,
 )
-from perlimen_lite.tests.erasure_restart import check_erasure_restart
+from perlimen_lite.tests.erasure_restart import check_erasure_restart, serve_lite
 from PIL import Image
 from sqlalchemy import Connection, Engine, event, select
 from sqlalchemy.exc import ProgrammingError
@@ -104,14 +113,14 @@ def test_migrate_and_serve_fresh_postgres(tmp_path: Path, monkeypatch: pytest.Mo
         user=BOOTSTRAP,
         password=required("PERLIMEN_LITE_BOOTSTRAP_PASSWORD"),
         connect_timeout=5,
-    ) as conn:
-        assert not conn.execute(
+    ) as bootstrap_conn:
+        assert not bootstrap_conn.execute(
             "SELECT 1 FROM pg_namespace WHERE nspname NOT IN ('information_schema', 'public') "
             "AND left(nspname, 3) <> 'pg_'"
         ).fetchall(), "test requires fresh Postgres"
-        assert not conn.execute("SELECT 1 FROM pg_tables WHERE schemaname = 'public'").fetchall(), (
-            "test requires an empty public schema"
-        )
+        assert not bootstrap_conn.execute(
+            "SELECT 1 FROM pg_tables WHERE schemaname = 'public'"
+        ).fetchall(), "test requires an empty public schema"
 
     # Both CLI calls target the same database; the second must be a no-op for revisions.
     monkeypatch.setenv("PGHOSTADDR", "127.0.0.2")
@@ -179,8 +188,21 @@ def test_migrate_and_serve_fresh_postgres(tmp_path: Path, monkeypatch: pytest.Mo
     root.mkdir(mode=0o700)
     monkeypatch.setenv("PERLIMEN_LITE_MEDIA_ROOT", str(root))
     monkeypatch.setenv("THRESHOLD_INTERNAL_TOKEN", "lite-smoke-test-only")
+    from social.main_dependencies import settings as social_settings
+    from users.main_dependencies import settings as users_settings
+
+    monkeypatch.setattr(social_settings, "nats_enabled", True)
+    monkeypatch.setattr(users_settings, "nats_enabled", True)
+    broker_attempts: list[None] = []
+
+    async def unexpected_broker(*args: object, **kwargs: object) -> None:
+        broker_attempts.append(None)
+        raise AssertionError("Lite attempted a NATS connection")
+
+    monkeypatch.setattr(nats, "connect", unexpected_broker)
     from perlimen_lite.main import app
 
+    check_operator_identity(monkeypatch)
     with TestClient(app) as client:
         assert client.get("/healthz").status_code == 200
         assert client.get("/readyz").status_code == 200
@@ -247,8 +269,130 @@ def test_migrate_and_serve_fresh_postgres(tmp_path: Path, monkeypatch: pytest.Mo
         assert not client.cookies
         check_social_policy(client)
         check_events(client)
+    assert not broker_attempts
 
     check_erasure_restart(root)
+
+
+def check_operator_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    origin = f"http://127.0.0.1:{port}"
+    identity = {
+        "subject": "isolated-operator-subject",
+        "email": "operator@example.test",
+        "username": "lite-operator",
+    }
+    headers = {"X-Threshold-Internal-Token": required("THRESHOLD_INTERNAL_TOKEN")}
+    endpoint_path = "/users/internal/v1/operator-identity"
+    profile_path = f"/users/v1/profiles/{identity['username']}"
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    jwk = RSAAlgorithm.to_jwk(key.public_key(), as_dict=True)
+    jwks = json.dumps({"keys": [{**jwk, "kid": "lite-test"}]}).encode()
+
+    class SyntheticJwks(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            assert self.path == "/jwks"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(jwks)
+
+    with HTTPServer(("127.0.0.1", 0), SyntheticJwks) as issuer, monkeypatch.context() as patch:
+        issuer.timeout = 10
+        jwks_origin = f"http://127.0.0.1:{issuer.server_port}"
+        audience = "lite-admin-test"
+        patch.setenv("THRESHOLD_AUTHENTIK_AUDIENCE", audience)
+        patch.setenv("no_proxy", "127.0.0.1")
+        from auth_gateway import main as gateway
+
+        config = GatewaySettings(
+            users_transport="http",
+            users_base_url=f"{origin}/users",
+            authentik_issuer=jwks_origin,
+            authentik_jwks_url=f"{jwks_origin}/jwks",
+            authentik_audience=audience,
+        )
+        token = jwt.encode(
+            {
+                "iss": jwks_origin,
+                "aud": audience,
+                "sub": identity["subject"],
+                "exp": datetime.now(UTC) + timedelta(minutes=2),
+                "email": identity["email"],
+                "preferred_username": identity["username"],
+                "roles": ["moderator"],
+            },
+            key,
+            algorithm="RS256",
+            headers={"kid": "lite-test"},
+        )
+        bearer = {"Authorization": f"Bearer {token}"}
+        patch.setattr(gateway, "jwt_verifier", gateway._build_jwt_verifier(config))
+        patch.setattr(gateway, "users_profile_client", gateway._build_users_profile_client(config))
+        with (
+            httpx.Client(base_url=origin, timeout=5, trust_env=False) as lite,
+            serve_lite(lite, port),
+            TestClient(gateway.app) as operator,
+            ThreadPoolExecutor(max_workers=1) as pool,
+        ):
+            pool.submit(issuer.handle_request)
+            assert lite.post(endpoint_path, json=identity).status_code == 401
+            assert lite.post(endpoint_path, json=identity, headers=bearer).status_code == 401
+            extra_claim = lite.post(
+                endpoint_path, json={**identity, "roles": ["moderator"]}, headers=headers
+            )
+            assert extra_claim.status_code == 422
+            legacy = lite.post(
+                "/users/internal/v1/current-profile",
+                json={"authentik_subject": identity["subject"], "username": identity["username"]},
+                headers=headers,
+            )
+            assert legacy.status_code == 404
+            for _ in range(2):
+                result = operator.get("/me", headers=bearer)
+                assert result.status_code == 200
+                assert result.json() == {"status": "authenticated", **identity}
+                assert "set-cookie" not in result.headers
+            assert lite.get(profile_path, headers=headers).status_code == 404
+            for path in ("/users/v1/auth/me", "/users/v1/moderation/reports"):
+                assert lite.get(path, headers=headers | bearer).status_code == 401
+
+            engine = engine_for(endpoint(), "users", "runtime")
+            try:
+                with engine.connect() as conn:
+                    for table in (
+                        "application_users",
+                        "consumer_profiles",
+                        "onboarding_preferences",
+                        "user_credentials",
+                        "user_sessions",
+                        "page_memberships",
+                    ):
+                        rows = conn.exec_driver_sql(f"SELECT 1 FROM {table} LIMIT 1")
+                        assert rows.first() is None
+                registration = lite.post(
+                    "/users/v1/auth/register",
+                    headers=headers,
+                    json={
+                        "email": identity["email"],
+                        "username": identity["username"],
+                        "password": "Test-Only-x9L48Vr",
+                    },
+                )
+                assert registration.status_code == 201, registration.text
+                assert operator.get("/me", headers=bearer).json() == {
+                    "status": "authenticated",
+                    **identity,
+                }
+                assert lite.get(profile_path, headers=headers).status_code == 200
+                with engine.connect() as conn:
+                    assert conn.exec_driver_sql(
+                        "SELECT username, email, authentik_subject FROM application_users"
+                    ).one() == (identity["username"], identity["email"], None)
+            finally:
+                engine.dispose()
 
 
 def check_events(client: TestClient) -> None:

@@ -54,26 +54,26 @@ Keep this map correct: line ranges shift whenever content is added or removed.
 | **5** | **System context** — you need the repo layout or the ownership split | 311-349 |
 | 5.1 | Repository layout | 313-333 |
 | 5.2 | Service ownership | 334-349 |
-| **6** | **Architecture** — touching runtime, service transports, CI/CD or GitOps | 350-402 |
-| 6.1 | Runtime | 352-376 |
-| 6.2 | Service-to-service transports | 377-389 |
-| 6.3 | Build, publication and deployment | 390-402 |
-| **7** | **Security** — touching auth, trust boundaries, secrets or headers | 403-420 |
-| **8** | **Privacy and data retention** — touching personal data, deletion or backups | 421-434 |
-| **9** | **Data model** — changing tables or migrations | 435-471 |
-| 9.1 | users | 440-450 |
-| 9.2 | social | 451-456 |
-| 9.3 | events | 457-464 |
-| 9.4 | media | 465-471 |
-| **10** | **API contract** — adding or changing an endpoint | 472-551 |
-| 10.1 | Conventions | 474-479 |
-| 10.2 | users | 480-501 |
-| 10.3 | social | 502-515 |
-| 10.4 | events | 516-531 |
-| 10.5 | media and auth-gateway | 532-538 |
-| 10.6 | Web BFF | 539-551 |
-| **11** | **Test plan** — you need test locations, gates or CI jobs | 552-567 |
-| **12** | **References** — you need operational detail kept out of this file | 568-577 |
+| **6** | **Architecture** — touching runtime, service transports, CI/CD or GitOps | 350-405 |
+| 6.1 | Runtime | 352-378 |
+| 6.2 | Service-to-service transports | 379-392 |
+| 6.3 | Build, publication and deployment | 393-405 |
+| **7** | **Security** — touching auth, trust boundaries, secrets or headers | 406-425 |
+| **8** | **Privacy and data retention** — touching personal data, deletion or backups | 426-439 |
+| **9** | **Data model** — changing tables or migrations | 440-476 |
+| 9.1 | users | 445-455 |
+| 9.2 | social | 456-461 |
+| 9.3 | events | 462-469 |
+| 9.4 | media | 470-476 |
+| **10** | **API contract** — adding or changing an endpoint | 477-561 |
+| 10.1 | Conventions | 479-484 |
+| 10.2 | users | 485-507 |
+| 10.3 | social | 508-521 |
+| 10.4 | events | 522-537 |
+| 10.5 | media and auth-gateway | 538-548 |
+| 10.6 | Web BFF | 549-561 |
+| **11** | **Test plan** — you need test locations, gates or CI jobs | 562-577 |
+| **12** | **References** — you need operational detail kept out of this file | 578-587 |
 
 ---
 
@@ -371,7 +371,9 @@ The opt-in local backend (`perlimen_lite.main:app`) mounts the four product rout
 `/users`, `/social`, `/events` and `/media` behind the internal token. Users still authenticates
 product sessions. One dedicated PostgreSQL database holds four isolated schemas, each with
 a separate Alembic ledger, migration login and non-owner runtime login. Root readiness checks
-the four heads and the private media directory. This backend does not replace the k3s deployment.
+the four heads and the private media directory. Lite starts neither a NATS broker nor NATS
+clients. The optional Authentik gateway is a separate process, not part of product login.
+This backend does not replace the k3s deployment.
 See [Perlimen Lite backend](docs/perlimen-lite-backend.md) for the local configuration contract.
 
 ### 6.2 Service-to-service transports
@@ -381,6 +383,7 @@ See [Perlimen Lite backend](docs/perlimen-lite-backend.md) for the local configu
 | In-process owner API (Lite) | Social follows, blocks, mentions and notifications; Events Page roles, artist and user references, guest and update notifications, and city announcements; media asset validation; account erasure. Each call uses the owner's runtime login |
 | NATS request/reply (standalone) | `users.current_profile.v1` (auth-gateway → users), `users.follow.list_following.v1` (social → users) |
 | NATS pub/sub (standalone) | `users.block.changed.v1` (users → social) |
+| Private HTTP (optional Lite gateway) | `POST /users/internal/v1/operator-identity` with `X-Threshold-Internal-Token`; confirms verified operator claims without a database lookup or write |
 | HTTP `/internal/v1/*` with `X-Threshold-Internal-Token` | Standalone cross-service calls and integrations not moved in-process: Page roles and artist lookups (events → users), notifications and mention lookups, event announcements (events → social), account erasure (users → social/events/media), media asset validation |
 
 The BFF sends `social`, `events` and `media` the internal token and session-derived identity
@@ -413,6 +416,8 @@ the BFF also sends the internal token to the pinned loopback `/users` endpoint w
 - Check-in tokens are short-lived, opaque, single-use and stored hashed (§3.7).
 - Media uploads are streamed with byte, header and part limits before decoding (§3.8).
 - Authentik serves operator/admin SSO only; `auth-gateway` validates its JWTs via JWKS.
+  Lite HTTP mode requires an expiring bearer for a dedicated admin audience. An operator-only
+  Authentik policy must restrict issuance; audience validation does not check group membership.
 - CI: Gitleaks and Trivy run in the `security` job; `go-task repo:secret-scan` runs locally.
   Untrusted pull-request jobs carry no publication credentials.
 
@@ -494,7 +499,8 @@ appropriate.
   `POST /v1/notifications/{id}/read`, `POST /v1/notifications/read-all`,
   `GET|PUT /v1/notifications/preferences`.
 - Safety: `POST /v1/reports`, `GET /v1/moderation/reports`, `GET /v1/safety/audit-log`.
-- Internal: `current-profile`, `users/{id}/onboarding-preferences`, `pages/organizer-refs`,
+- Internal: `current-profile` (standalone only), `users/{id}/onboarding-preferences`,
+  `pages/organizer-refs`,
   `users/active-refs`, `pages/{page_id}/members/{user_id}`, `blocks`,
   `users/{blocker}/blocks/{blocked}`, `mention-targets/profiles|pages/{handle}`,
   `artist-profiles/{id}`, `artist-profiles/batch`, `notifications`.
@@ -534,7 +540,11 @@ appropriate.
 - media: `POST /v1/assets`, `POST /v1/assets/upload`, `GET /v1/config/storage`,
   `GET /internal/v1/assets/{asset_id}`, `POST /internal/v1/account-erasure`,
   `GET /media/assets/{asset_path}` (paths must start with `assets/`; no `.`/`..` segments).
-- auth-gateway: `GET /me` (Authentik bearer token → current profile via NATS), plus health.
+- auth-gateway: `GET /me` plus health. Standalone resolves the current profile over NATS.
+  The optional Lite gateway confirms verified Authentik claims via private HTTP and returns only
+  `status`, `subject`, `email` and `username`. It creates or links no product profile, reserves
+  no username or email, and issues no product session or role. Public product lookup does not
+  find the operator identity; ordinary registration can use the same username and email.
 
 ### 10.6 Web BFF
 

@@ -102,7 +102,10 @@ The public forge-hook path is Cloudflare → connector → webhook-only NGINX �
 
 ## Service-To-Service Transports
 
-Two transports are in use. Do not add a third.
+Standalone services use two network transports. Lite starts neither the NATS broker nor its
+clients. Product domains call the owning domain in process; the optional operator gateway
+uses private HTTP to confirm identity without provisioning a product profile. See the
+[Lite backend](perlimen-lite-backend.md#broker-and-operator-sso) for the subject inventory.
 
 | Transport | Flows |
 |---|---|

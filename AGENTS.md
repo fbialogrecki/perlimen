@@ -171,7 +171,8 @@ Service ownership and shipped MVP state live in `PROJECT_SPECIFICATION.md` §5.2
 - Lite is opt-in and uses a dedicated local PostgreSQL instance only. Its [backend contract](docs/perlimen-lite-backend.md) defines the entrypoint, role-scoped migrations and private router prefixes. Never point it at CNPG or pass a session across domains.
 - A failed migration hook must stay loud. GitOps keeps the failed Job (`hook-delete-policy: HookSucceeded`, without `BeforeHookCreation`), which turns the application Degraded and blocks the next sync until someone looks. An application can report Synced/Healthy while its sync operation failed, so never treat those two columns as proof that migrations ran.
 - Use Postgres for relational work. Do not move joins or filtering into Python when SQL is the right tool.
-- Use NATS request/reply for synchronous internal calls and pub/sub for non-critical events.
+- Standalone uses NATS request/reply for synchronous internal calls and pub/sub for non-critical
+  events. Lite starts no NATS clients; its optional operator gateway uses private HTTP only.
 - For critical events that must not be lost, design transactional outbox + retry + idempotent consumers before relying on NATS Core.
 - Do not log secrets, tokens, password hashes, reset tokens, or private location payloads.
 - Deploy pitfalls: ConfigMaps load via `envFrom` without a hash, so a ConfigMap-only change needs `kubectl -n threshold rollout restart deploy/<svc>`. A CNPG `Cluster` spec change restarts the DB and can race the migrate hook; delete the failed hook Job before re-syncing. Every service has a NetworkPolicy, so a new HTTP caller must be added to the callee's policy (a missing entry looks like a timeout).
