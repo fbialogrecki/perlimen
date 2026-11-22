@@ -1,7 +1,9 @@
 from collections import defaultdict
 from datetime import datetime
+from functools import partial
 from typing import Annotated, Any
 
+from anyio import from_thread
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
 from social.api.schemas import (
     AnonymizeAuthorRequest,
@@ -55,13 +57,15 @@ from social.domain.models import (
 from social.erasure import fenced_erased_user_ids
 from social.main_dependencies import get_db_session, settings
 from social.mentions import MentionCandidate, extract_mention_candidates
+from social.owner import SocialOwner, get_social_owner
 from social.users_client import (
     create_notification,
     list_following_user_ids,
     resolve_event_mention,
     resolve_profile_or_page_mention,
 )
-from sqlalchemy import and_, delete, func, or_, select
+from sqlalchemy import String, all_, and_, any_, delete, func, literal, or_, select
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
@@ -120,6 +124,7 @@ def optional_viewer_id(
 
 
 ViewerId = Annotated[str | None, Depends(optional_viewer_id)]
+Owner = Annotated[SocialOwner | None, Depends(get_social_owner)]
 
 
 def _normalize_handle(value: str | None) -> str | None:
@@ -165,8 +170,13 @@ def _reject_blocked_mentions(session: Session, *, author_user_id: str, mentions:
 
 
 def _reject_blocked_resolved_mentions(
-    session: Session, *, author_user_id: str, mentions: list[ResolvedMention]
+    session: Session, *, author_user_id: str, mentions: list[ResolvedMention], owner: Owner
 ) -> None:
+    if owner is not None:
+        recipients = {m.recipient_user_id for m in mentions if m.recipient_user_id}
+        if recipients and recipients.intersection(owner.blocks(author_user_id)[1]):
+            raise HTTPException(status_code=403, detail="blocked user cannot mention blocker")
+        return
     for mention in mentions:
         if mention.recipient_user_id and _is_blocked(
             session,
@@ -202,6 +212,25 @@ def _blocked_feed_author_ids(session: Session, viewer_id: str) -> set[str]:
     return blocked
 
 
+def _lite_blocked_ids(owner: SocialOwner | None, viewer_id: str | None) -> set[str]:
+    if owner is None or viewer_id is None:
+        return set()
+    outgoing, incoming = owner.blocks(viewer_id)
+    return outgoing | incoming
+
+
+def _exclude_blocked(model: type[Post] | type[Comment], ids: set[str]) -> list[ColumnElement[bool]]:
+    if not ids:
+        return []
+    # Bind a single array even for a large block registry (Lite is PostgreSQL-only).
+    return [model.author_user_id != all_(literal(list(ids), type_=ARRAY(String(36))))]
+
+
+def _reject_lite_blocked(ids: set[str], *authors: str) -> None:
+    if ids.intersection(authors):
+        raise HTTPException(status_code=404, detail="content not found")
+
+
 def _validate_post_media_assets(asset_ids: list[str], owner_user_id: str) -> None:
     for asset_id in asset_ids:
         try:
@@ -226,7 +255,9 @@ def _explicit_candidate(mention: Any) -> MentionCandidate:
     )
 
 
-async def _resolve_mentions(body: str, explicit_mentions: list[Any]) -> list[ResolvedMention]:
+def _resolve_mentions(
+    body: str, explicit_mentions: list[Any], owner: SocialOwner | None
+) -> list[ResolvedMention]:
     candidates = extract_mention_candidates(body)
     seen = {_candidate_key(candidate) for candidate in candidates}
     for mention in explicit_mentions:
@@ -242,10 +273,12 @@ async def _resolve_mentions(body: str, explicit_mentions: list[Any]) -> list[Res
     target_seen: set[tuple[str, str | None]] = set()
     for candidate in candidates:
         payload = None
-        if candidate.kind == "event":
-            payload = await resolve_event_mention(settings, candidate.handle)
+        if owner is not None:
+            payload = owner.mention(candidate.kind, candidate.handle)
+        elif candidate.kind == "event":
+            payload = from_thread.run(resolve_event_mention, settings, candidate.handle)
         else:
-            payload = await resolve_profile_or_page_mention(settings, candidate.handle)
+            payload = from_thread.run(resolve_profile_or_page_mention, settings, candidate.handle)
         if payload is None:
             raise HTTPException(status_code=422, detail="mention target not found")
         target_type = str(payload.get("target_type") or candidate.kind)
@@ -275,14 +308,64 @@ async def _resolve_mentions(body: str, explicit_mentions: list[Any]) -> list[Res
     return resolved
 
 
-async def _notify_mentions(
-    mentions: list[ResolvedMention], *, actor: CurrentUser, target_type: str, target_id: str
+def _send_notification(
+    owner: SocialOwner | None,
+    *,
+    recipient_user_id: str,
+    actor_user_id: str,
+    event_type: str,
+    target_type: str,
+    target_id: str,
+    target_url: str,
+    title: str,
+    dedupe_key: str,
+    metadata: dict[str, str | int | bool | None],
+) -> None:
+    if owner is None:
+        from_thread.run(
+            partial(
+                create_notification,
+                settings,
+                recipient_user_id=recipient_user_id,
+                actor_user_id=actor_user_id,
+                event_type=event_type,
+                target_type=target_type,
+                target_id=target_id,
+                target_url=target_url,
+                title=title,
+                dedupe_key=dedupe_key,
+                metadata=metadata,
+            )
+        )
+    elif actor_user_id != recipient_user_id:
+        owner.notify(
+            {
+                "recipient_user_id": recipient_user_id,
+                "actor_user_id": actor_user_id,
+                "type": event_type,
+                "target_type": target_type,
+                "target_id": target_id,
+                "target_url": target_url,
+                "title": title,
+                "dedupe_key": dedupe_key,
+                "metadata": metadata,
+            }
+        )
+
+
+def _notify_mentions(
+    mentions: list[ResolvedMention],
+    *,
+    actor: CurrentUser,
+    target_type: str,
+    target_id: str,
+    owner: SocialOwner | None,
 ) -> None:
     for mention in mentions:
         if mention.recipient_user_id is None:
             continue
-        await create_notification(
-            settings,
+        _send_notification(
+            owner,
             recipient_user_id=mention.recipient_user_id,
             actor_user_id=actor.user_id,
             event_type="mention.created",
@@ -766,6 +849,7 @@ def get_event_announcement_posts(
     payload: EventAnnouncementPostsRequest,
     session: DbSession,
     user: CurrentPrincipal,
+    owner: Owner,
 ) -> EventAnnouncementPostsResponse:
     viewer_id = user.user_id
     event_ids = list(dict.fromkeys(payload.event_ids))
@@ -847,7 +931,11 @@ def get_event_announcement_posts(
             continue
         seen_post_ids.add(post.id)
         posts.append(post)
-    blocked_author_ids = _blocked_feed_author_ids(session, viewer_id)
+    blocked_author_ids = (
+        _lite_blocked_ids(owner, viewer_id)
+        if owner is not None
+        else _blocked_feed_author_ids(session, viewer_id)
+    )
     posts = [post for post in posts if post.author_user_id not in blocked_author_ids]
     return EventAnnouncementPostsResponse(
         posts=_posts_response(session, posts, viewer_id),
@@ -858,10 +946,11 @@ def get_event_announcement_posts(
     )
 
 
-async def _create_post(
+def _create_post(
     payload: PostCreateRequest,
     user: CurrentUser,
     session: Session,
+    owner: SocialOwner | None,
 ) -> PostResponse:
     group_id: str | None = None
     if payload.group_slug:
@@ -877,13 +966,12 @@ async def _create_post(
         if membership is None:
             raise HTTPException(status_code=403, detail="group membership required")
         group_id = group.id
-    _reject_blocked_mentions(session, author_user_id=user.user_id, mentions=payload.mentions)
-    resolved_mentions = await _resolve_mentions(payload.body, payload.mentions)
-    for mention in resolved_mentions:
-        if mention.recipient_user_id and _is_blocked(
-            session, blocker_user_id=mention.recipient_user_id, blocked_user_id=user.user_id
-        ):
-            raise HTTPException(status_code=403, detail="blocked user cannot mention blocker")
+    if owner is None:
+        _reject_blocked_mentions(session, author_user_id=user.user_id, mentions=payload.mentions)
+    resolved_mentions = _resolve_mentions(payload.body, payload.mentions, owner)
+    _reject_blocked_resolved_mentions(
+        session, author_user_id=user.user_id, mentions=resolved_mentions, owner=owner
+    )
     _validate_post_media_assets(payload.media_asset_ids, user.user_id)
     _fence_user_write(
         session,
@@ -916,18 +1004,21 @@ async def _create_post(
         )
     session.commit()
     session.refresh(post)
-    await _notify_mentions(resolved_mentions, actor=user, target_type="post", target_id=post.id)
+    _notify_mentions(
+        resolved_mentions, actor=user, target_type="post", target_id=post.id, owner=owner
+    )
     return _post_response(session, post, user.user_id)
 
 
 @router.post("/v1/posts", response_model=PostResponse, status_code=status.HTTP_201_CREATED)
-async def create_post(
+def create_post(
     payload: PostCreateRequest,
     user: CurrentPrincipal,
     _: WriteQuota,
     session: DbSession,
+    owner: Owner,
 ) -> PostResponse:
-    return await _create_post(payload, user, session)
+    return _create_post(payload, user, session, owner)
 
 
 @router.post(
@@ -935,19 +1026,21 @@ async def create_post(
     response_model=PostResponse,
     status_code=status.HTTP_201_CREATED,
 )
-async def create_event_post(
+def create_event_post(
     payload: EventPostCreateRequest,
     user: CurrentPrincipal,
     _: WriteQuota,
     session: DbSession,
+    owner: Owner,
 ) -> PostResponse:
-    return await _create_post(payload, user, session)
+    return _create_post(payload, user, session, owner)
 
 
 @router.get("/v1/groups/{slug}/posts", response_model=FeedResponse)
 def list_group_posts(
     slug: str,
     session: DbSession,
+    owner: Owner,
     viewer_id: ViewerId = None,
     before: Annotated[str | None, Query()] = None,
     limit: Annotated[int | None, Query(ge=1)] = None,
@@ -956,6 +1049,7 @@ def list_group_posts(
     if group is None:
         raise HTTPException(status_code=404, detail="group not found")
     conditions = [Post.group_id == group.id]
+    conditions += _exclude_blocked(Post, _lite_blocked_ids(owner, viewer_id))
     cursor_condition = _cursor_condition(Post, before)
     if cursor_condition is not None:
         conditions.append(cursor_condition)
@@ -964,27 +1058,31 @@ def list_group_posts(
 
 
 @router.get("/v1/posts/{post_id}", response_model=PostResponse)
-def get_post(post_id: str, session: DbSession, viewer_id: ViewerId = None) -> PostResponse:
+def get_post(
+    post_id: str, session: DbSession, owner: Owner, viewer_id: ViewerId = None
+) -> PostResponse:
     post = _visible_post(session, post_id)
+    _reject_lite_blocked(_lite_blocked_ids(owner, viewer_id), post.author_user_id)
     return _post_response(session, post, viewer_id)
 
 
 @router.patch("/v1/posts/{post_id}", response_model=PostResponse)
-async def update_post(
+def update_post(
     post_id: str,
     payload: PostUpdateRequest,
     user: CurrentPrincipal,
     _: WriteQuota,
     session: DbSession,
+    owner: Owner,
 ) -> PostResponse:
     post = _visible_post(session, post_id)
     if post.author_type == "system":
         raise HTTPException(status_code=403, detail="system posts cannot be edited")
     if post.author_user_id != user.user_id:
         raise HTTPException(status_code=403, detail="only the author can edit this post")
-    resolved_mentions = await _resolve_mentions(payload.body, [])
+    resolved_mentions = _resolve_mentions(payload.body, [], owner)
     _reject_blocked_resolved_mentions(
-        session, author_user_id=user.user_id, mentions=resolved_mentions
+        session, author_user_id=user.user_id, mentions=resolved_mentions, owner=owner
     )
     _fence_user_write(
         session,
@@ -1037,19 +1135,20 @@ def delete_post(
 
 
 @router.patch("/v1/comments/{comment_id}", response_model=CommentResponse)
-async def update_comment(
+def update_comment(
     comment_id: str,
     payload: CommentUpdateRequest,
     user: CurrentPrincipal,
     _: WriteQuota,
     session: DbSession,
+    owner: Owner,
 ) -> CommentResponse:
     comment = _visible_comment(session, comment_id)
     if comment.author_user_id != user.user_id:
         raise HTTPException(status_code=403, detail="only the author can edit this comment")
-    resolved_mentions = await _resolve_mentions(payload.body, [])
+    resolved_mentions = _resolve_mentions(payload.body, [], owner)
     _reject_blocked_resolved_mentions(
-        session, author_user_id=user.user_id, mentions=resolved_mentions
+        session, author_user_id=user.user_id, mentions=resolved_mentions, owner=owner
     )
     _fence_user_write(
         session,
@@ -1136,11 +1235,16 @@ def _attach_comment_mentions(comment: Comment, mentions: list[ResolvedMention]) 
         )
 
 
-async def _notify_comment_created(
-    *, post: Post, comment: Comment, actor: CurrentUser, mentions: list[ResolvedMention]
+def _notify_comment_created(
+    *,
+    post: Post,
+    comment: Comment,
+    actor: CurrentUser,
+    mentions: list[ResolvedMention],
+    owner: SocialOwner | None,
 ) -> None:
-    await create_notification(
-        settings,
+    _send_notification(
+        owner,
         recipient_user_id=post.author_user_id,
         actor_user_id=actor.user_id,
         event_type="comment.created",
@@ -1156,28 +1260,39 @@ async def _notify_comment_created(
             "actor_display_name": actor.display_name,
         },
     )
-    await _notify_mentions(mentions, actor=actor, target_type="comment", target_id=comment.id)
+    _notify_mentions(
+        mentions, actor=actor, target_type="comment", target_id=comment.id, owner=owner
+    )
 
 
 @router.post("/v1/posts/{post_id}/comments", response_model=CommentResponse, status_code=201)
-async def create_comment(
+def create_comment(
     post_id: str,
     payload: CommentCreateRequest,
     user: CurrentPrincipal,
     _: WriteQuota,
     session: DbSession,
+    owner: Owner,
 ) -> CommentResponse:
     post = _visible_post(session, post_id)
-    if _is_blocked(session, blocker_user_id=post.author_user_id, blocked_user_id=user.user_id):
+    blocked_ids = _lite_blocked_ids(owner, user.user_id)
+    if (owner is not None and post.author_user_id in blocked_ids) or (
+        owner is None
+        and _is_blocked(session, blocker_user_id=post.author_user_id, blocked_user_id=user.user_id)
+    ):
         raise HTTPException(
             status_code=403,
             detail="blocked user cannot comment on blocker content",
         )
     _validate_comment_parent(session, post=post, parent_id=payload.parent_id)
-    _reject_blocked_mentions(session, author_user_id=user.user_id, mentions=payload.mentions)
-    resolved_mentions = await _resolve_mentions(payload.body, payload.mentions)
+    if owner is None:
+        _reject_blocked_mentions(session, author_user_id=user.user_id, mentions=payload.mentions)
+    elif payload.parent_id:
+        parent = _visible_comment(session, payload.parent_id)
+        _reject_lite_blocked(blocked_ids, parent.author_user_id)
+    resolved_mentions = _resolve_mentions(payload.body, payload.mentions, owner)
     _reject_blocked_resolved_mentions(
-        session, author_user_id=user.user_id, mentions=resolved_mentions
+        session, author_user_id=user.user_id, mentions=resolved_mentions, owner=owner
     )
     _fence_user_write(
         session,
@@ -1189,11 +1304,12 @@ async def create_comment(
     _attach_comment_mentions(comment, resolved_mentions)
     session.commit()
     session.refresh(comment)
-    await _notify_comment_created(
+    _notify_comment_created(
         post=post,
         comment=comment,
         actor=user,
         mentions=resolved_mentions,
+        owner=owner,
     )
     # Through the response builder so the creator gets viewer_is_author=True.
     return _comments_response(session, [comment], user.user_id)[0]
@@ -1203,12 +1319,16 @@ async def create_comment(
 def list_comments(
     post_id: str,
     session: DbSession,
+    owner: Owner,
     viewer_id: ViewerId = None,
     before: Annotated[str | None, Query()] = None,
     limit: Annotated[int | None, Query(ge=1)] = None,
 ) -> list[CommentResponse]:
-    _visible_post(session, post_id)
+    post = _visible_post(session, post_id)
+    blocked_ids = _lite_blocked_ids(owner, viewer_id)
+    _reject_lite_blocked(blocked_ids, post.author_user_id)
     conditions = [Comment.post_id == post_id, Comment.hidden_at.is_(None)]
+    conditions += _exclude_blocked(Comment, blocked_ids)
     cursor_condition = _cursor_condition(Comment, before)
     if cursor_condition is not None:
         conditions.append(cursor_condition)
@@ -1228,9 +1348,11 @@ def vote_post(
     user: CurrentPrincipal,
     _: WriteQuota,
     session: DbSession,
+    owner: Owner,
 ) -> SimpleStatusResponse:
     _fence_user_write(session, user.user_id)
-    _visible_post(session, post_id)
+    post = _visible_post(session, post_id)
+    _reject_lite_blocked(_lite_blocked_ids(owner, user.user_id), post.author_user_id)
     reaction = session.scalar(
         select(Reaction).where(Reaction.post_id == post_id, Reaction.user_id == user.user_id)
     )
@@ -1279,9 +1401,16 @@ def vote_comment(
     user: CurrentPrincipal,
     _: WriteQuota,
     session: DbSession,
+    owner: Owner,
 ) -> SimpleStatusResponse:
     _fence_user_write(session, user.user_id)
-    _visible_comment(session, comment_id)
+    comment = _visible_comment(session, comment_id)
+    if owner is not None:
+        _reject_lite_blocked(
+            _lite_blocked_ids(owner, user.user_id),
+            comment.author_user_id,
+            comment.post.author_user_id,
+        )
     reaction = session.scalar(
         select(CommentReaction).where(
             CommentReaction.comment_id == comment_id,
@@ -1340,9 +1469,11 @@ def add_emoji_reaction(
     user: CurrentPrincipal,
     _: WriteQuota,
     session: DbSession,
+    owner: Owner,
 ) -> SimpleStatusResponse:
     _fence_user_write(session, user.user_id)
-    _visible_post(session, post_id)
+    post = _visible_post(session, post_id)
+    _reject_lite_blocked(_lite_blocked_ids(owner, user.user_id), post.author_user_id)
     existing = session.scalar(
         select(PostEmojiReaction).where(
             PostEmojiReaction.post_id == post_id,
@@ -1548,29 +1679,37 @@ def list_safety_audit_log(
 
 
 @router.get("/v1/feed", response_model=FeedResponse)
-async def get_feed(
+def get_feed(
     user: CurrentPrincipal,
     session: DbSession,
+    owner: Owner,
     filter: Annotated[str, Query(pattern="^(all|posts)$")] = "all",
     before: Annotated[str | None, Query()] = None,
     limit: Annotated[int | None, Query(ge=1)] = None,
 ) -> FeedResponse:
-    followed_user_ids = await list_following_user_ids(settings, user.user_id)
-    group_ids = set(
-        session.scalars(
-            select(GroupMembership.group_id).where(GroupMembership.user_id == user.user_id)
-        ).all()
+    followed_user_ids = (
+        owner.followed_users(user.user_id)
+        if owner is not None
+        else from_thread.run(list_following_user_ids, settings, user.user_id)
     )
-    filters = []
-    if followed_user_ids:
-        filters.append(Post.author_user_id.in_(followed_user_ids))
-    if group_ids:
+    groups = select(GroupMembership.group_id).where(GroupMembership.user_id == user.user_id)
+    filters: list[ColumnElement[bool]] = []
+    if owner is not None:
+        filters.append(Post.group_id.in_(groups))
+    elif group_ids := set(session.scalars(groups)):
         filters.append(Post.group_id.in_(group_ids))
+    if followed_user_ids:
+        filters.append(
+            Post.author_user_id == any_(literal(list(followed_user_ids), type_=ARRAY(String(36))))
+            if owner is not None
+            else Post.author_user_id.in_(followed_user_ids)
+        )
     if not filters:
         return FeedResponse(items=[], next_before=None)
     conditions = [or_(*filters), Post.hidden_at.is_(None)]
-    blocked_author_ids = _blocked_feed_author_ids(session, user.user_id)
-    if blocked_author_ids:
+    if owner is not None:
+        conditions += _exclude_blocked(Post, _lite_blocked_ids(owner, user.user_id))
+    elif blocked_author_ids := _blocked_feed_author_ids(session, user.user_id):
         conditions.append(Post.author_user_id.not_in(blocked_author_ids))
     cursor_condition = _cursor_condition(Post, before)
     if cursor_condition is not None:
@@ -1595,7 +1734,9 @@ def search_groups(q: str, session: DbSession) -> list[GroupResponse]:
 
 
 @router.post("/v1/internal/anonymize-author", response_model=SimpleStatusResponse)
-def anonymize_author(payload: AnonymizeAuthorRequest, session: DbSession) -> SimpleStatusResponse:
+def anonymize_author(
+    payload: AnonymizeAuthorRequest, session: DbSession, owner: Owner
+) -> SimpleStatusResponse:
     erased_user_ids = fenced_erased_user_ids(session, [payload.user_id])
     if payload.user_id not in erased_user_ids:
         session.add(AccountErasureTombstone(user_id=payload.user_id))
@@ -1615,12 +1756,13 @@ def anonymize_author(payload: AnonymizeAuthorRequest, session: DbSession) -> Sim
         post.media_asset_ids = []
 
     session.execute(delete(GroupMembership).where(GroupMembership.user_id == payload.user_id))
-    session.execute(
-        delete(UserBlock).where(
-            (UserBlock.blocker_user_id == payload.user_id)
-            | (UserBlock.blocked_user_id == payload.user_id)
+    if owner is None:
+        session.execute(
+            delete(UserBlock).where(
+                (UserBlock.blocker_user_id == payload.user_id)
+                | (UserBlock.blocked_user_id == payload.user_id)
+            )
         )
-    )
     for mention in session.scalars(
         select(PostMention).where(PostMention.target_id == payload.user_id)
     ):

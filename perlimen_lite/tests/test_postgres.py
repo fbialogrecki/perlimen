@@ -1,6 +1,7 @@
 """Opt-in integration test. Requires a pristine, disposable Lite Postgres."""
 
 import os
+import secrets
 import subprocess
 import sys
 from pathlib import Path
@@ -19,7 +20,7 @@ from perlimen_lite.database import (
     required,
     role,
 )
-from sqlalchemy import Connection
+from sqlalchemy import Connection, Engine, event
 from sqlalchemy.exc import ProgrammingError
 
 TABLES = {
@@ -95,6 +96,11 @@ def test_migrate_and_serve_fresh_postgres(tmp_path: Path, monkeypatch: pytest.Mo
             assert (
                 conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one() == head
             )
+            if domain == "social":
+                assert (
+                    conn.exec_driver_sql("SELECT to_regclass('social.user_blocks')").scalar()
+                    is None
+                )
             own = TABLES[domain]
             assert conn.exec_driver_sql(f"SELECT count(*) FROM {own}").scalar_one() == 0
             conn.exec_driver_sql(f"DELETE FROM {own} WHERE false")
@@ -184,3 +190,106 @@ def test_migrate_and_serve_fresh_postgres(tmp_path: Path, monkeypatch: pytest.Mo
         assert client.cookies.get("threshold_refresh", path=auth_path)
         assert client.get(f"{auth_path}/me").status_code == 401
         assert not client.cookies
+        check_social_policy(client)
+
+
+def check_social_policy(client: TestClient) -> None:
+    password = f"Fixture-A8!{secrets.token_hex(8)}"
+
+    def account(name: str) -> dict[str, str]:
+        client.cookies.clear()
+        response = client.post(
+            "/users/v1/auth/register",
+            json={"email": f"{name}@example.test", "username": name, "password": password},
+        )
+        assert response.status_code == 201
+        return {"X-Threshold-User-Id": response.json()["user"]["id"], "X-Threshold-Username": name}
+
+    viewer = account("queryviewer")
+    author = account("queryauthor")
+    control = account("querycontrol")
+    group = "/social/v1/groups/techno-warsaw"
+    posts = "/social/v1/posts"
+    feed = "/social/v1/feed"
+    for principal in (viewer, author, control):
+        assert client.post(f"{group}/membership", headers=principal).status_code == 200
+    visible = client.post(
+        posts, headers=control, json={"body": "control", "group_slug": "techno-warsaw"}
+    )
+    assert visible.status_code == 201
+    control_id = visible.json()["id"]
+    discussion = f"{posts}/{control_id}/comments"
+    comment = client.post(discussion, headers=author, json={"body": "Hello @querycontrol"})
+    assert comment.status_code == 201
+    assert comment.json()["mentions"][0]["target_id"] == control["X-Threshold-User-Id"]
+    inbox = client.get("/users/v1/notifications").json()
+    assert {"comment.created", "mention.created"} <= {item["type"] for item in inbox}
+    assert (
+        client.put(
+            f"{posts}/{control_id}/reaction", headers=author, json={"kind": "up"}
+        ).status_code
+        == 200
+    )
+    assert (
+        client.put(f"{posts}/{control_id}/emoji", headers=author, json={"emoji": "🎵"}).status_code
+        == 200
+    )
+    for index in range(8):
+        post = client.post(
+            posts, headers=author, json={"body": f"post {index}", "group_slug": "techno-warsaw"}
+        )
+        assert post.status_code == 201
+    author_post = post.json()["id"]
+
+    def counted_feed(limit: int) -> tuple[list[str], dict[str, int]]:
+        reads: dict[str, int] = {}
+
+        def tally(conn: Connection, _cursor: object, statement: str, *_: object) -> None:
+            login = conn.engine.url.username
+            if login and statement.lstrip().upper().startswith("SELECT"):
+                reads[login] = reads.get(login, 0) + 1
+
+        event.listen(Engine, "before_cursor_execute", tally)
+        try:
+            response = client.get(feed, headers=viewer, params={"limit": limit})
+            assert response.status_code == 200
+            return [item["id"] for item in response.json()["items"]], reads
+        finally:
+            event.remove(Engine, "before_cursor_execute", tally)
+
+    one, small = counted_feed(1)
+    many, large = counted_feed(20)
+    assert one == [author_post] and len(many) == 9 and many[-1] == control_id
+    assert small == large == {"lite_users_runtime": 2, "lite_social_runtime": 8}
+
+    # Control is the current product session. Its block must take effect in both directions.
+    assert client.post("/users/v1/me/blocks", json={"username": "queryauthor"}).status_code == 201
+    assert [item["id"] for item in client.get(feed, headers=control).json()["items"]] == [
+        control_id
+    ]
+    assert control_id not in {
+        item["id"] for item in client.get(feed, headers=author).json()["items"]
+    }
+    assert client.get(f"{group}/posts", headers=control).json()["items"][0]["id"] == control_id
+    assert client.get(f"{posts}/{author_post}", headers=control).status_code == 404
+    assert client.get(discussion, headers=control).json() == []
+    assert (
+        client.post(discussion, headers=author, json={"body": "blocked comment"}).status_code == 403
+    )
+    assert (
+        client.post(posts, headers=author, json={"body": "Hello @QUERYCONTROL"}).status_code == 403
+    )
+    assert (
+        client.patch(
+            f"{posts}/{author_post}", headers=author, json={"body": "Hello @querycontrol"}
+        ).status_code
+        == 403
+    )
+    assert (
+        client.put(
+            f"{posts}/{control_id}/reaction", headers=author, json={"kind": "down"}
+        ).status_code
+        == 404
+    )
+    assert client.delete("/users/v1/me/blocks/queryauthor").status_code == 204
+    assert client.get(feed, headers=control).json()["items"][0]["id"] == author_post
