@@ -58,17 +58,20 @@ class LocalTarget(Target):
         if self.incompatible:
             raise RuntimeError("incompatible")
 
-    def eligible(self, sha: str) -> Release:
+    def verify_ci(self, sha: str) -> str:
         self.requests.append("CI")
         assert sha == self.candidate["sha"]
+        if self.unreachable:
+            raise OSError("GitHub unreachable")
         if self.rejected:
             raise subprocess.CalledProcessError(1, "verify_main_ci.py")
-        return self.candidate
+        return self.candidate["ci"]
 
     def prepare(self, release: Release) -> Deployment:
         return {**release, "checkout": f"{release['sha']}-test"}
 
     def main_matches(self, sha: str) -> bool:
+        self.requests.append("main")
         return self.candidate["sha"] == sha
 
     def activate(self, release: Deployment, phase: str) -> None:
@@ -76,6 +79,8 @@ class LocalTarget(Target):
         self.starts.append(self.running)
         if self.running == self.candidate and self.fail_activation:
             raise RuntimeError("not ready")
+        if phase == "candidate verified":
+            self.requests.append("ready")
 
     def live(self, release: Deployment, phase: str) -> None:
         if self.running is None or self.running["sha"] != release["sha"]:
@@ -139,12 +144,56 @@ def test_interrupted_switch_and_offline_restart_restore_last_committed_sha(tmp_p
     assert restarted.load() == state
 
 
+@pytest.mark.parametrize("has_baseline", [False, True])
+@pytest.mark.parametrize(
+    ("outcome", "error"),
+    [
+        ("non-green", subprocess.CalledProcessError),
+        ("replaced", RuntimeError),
+        ("unavailable", OSError),
+    ],
+)
+def test_rerun_during_readiness_does_not_promote_unchanged_tip(
+    tmp_path: Path, has_baseline: bool, outcome: str, error: type[Exception]
+) -> None:
+    target = LocalTarget(tmp_path)
+    if has_baseline:
+        target.poll(target.load())
+    baseline = target.load()
+    target.candidate = B
+    replacement: Release = {"sha": B["sha"], "ci": "new attempt evidence"}
+    activate = target.activate
+
+    def rerun_after_readiness(release: Deployment, phase: str) -> None:
+        activate(release, phase)
+        if phase == "candidate verified":
+            target.candidate = replacement
+            target.rejected = outcome == "non-green"
+            target.unreachable = outcome == "unavailable"
+
+    target.requests.clear()
+    with patch.object(target, "activate", side_effect=rerun_after_readiness), pytest.raises(error):
+        target.poll(target.load())
+    assert target.requests == ["git", "CI", "main", "ready", "CI"]
+    assert target.load() == baseline
+    assert target.running == (A if has_baseline else None)
+
+    target.rejected = False
+    target.unreachable = False
+    target.requests.clear()
+    target.poll(target.load())
+    assert target.requests == ["git", "CI", "main", "ready", "CI", "main"]
+    assert target.load()["current"] == target.prepare(replacement)
+
+
 def test_rollback_persists_hold_and_recovers_without_remote(tmp_path: Path) -> None:
     target = LocalTarget(tmp_path)
     target.poll(target.load())
     target.candidate = B
     target.poll(target.load())
+    target.requests.clear()
     target.rollback(target.load())
+    assert target.requests == []
     assert target.starts == [A, B, A]
     assert target.load() == {
         "held": True,
@@ -183,9 +232,8 @@ class GitTarget(Target):
         self.remote = remote
         self.data = directory / "synthetic-data"
 
-    def eligible(self, sha: str) -> Release:
-        assert self.main_matches(sha)
-        return {"sha": sha, "ci": "verified"}
+    def verify_ci(self, sha: str) -> str:
+        return "verified"
 
     def run(self, *args: str, cwd: Path | None = None, timeout: int = 30) -> str:
         if args[0] != "systemd-run":

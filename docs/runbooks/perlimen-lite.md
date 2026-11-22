@@ -120,10 +120,11 @@ This is not a permanent deployment mechanism or a replacement for legacy CI/CD.
 The optional user timer polls the public Perlimen repository every five minutes.
 It considers only the observed `main` tip, then requires the existing GitHub
 Actions workflow's successful **main-push** `ci-ok` for that exact SHA and run
-attempt. That gate includes the security scans; a green PR, incomplete run,
-replaced tip or unreadable GitHub response cannot authorize promotion. There is
-no new GitHub workflow, webhook, runner, deployment credential, or change to
-Woodpecker, Harbor or Argo CD. Intermediate pushes can be superseded.
+attempt, which includes the security scans. After readiness it requires the same
+successful proof, then rechecks the `main` tip. A green PR, changed proof or tip,
+or unreadable response cannot authorize promotion. Intermediate pushes can be
+superseded. No new workflow, webhook, runner, or deployment credential is needed;
+Woodpecker, Harbor and Argo CD are unchanged.
 
 ### Coordinator setup
 
@@ -186,7 +187,7 @@ in both the record and the live check; verify the same synthetic account still
 works. On first deployment there is no previous SHA. If a candidate fails health
 or is interrupted, the prior committed release remains authoritative; the next
 poll restores it if necessary without consulting GitHub. A confirmed activation
-failure blocks that SHA; an interrupted trial or unreadable tip can be retried.
+failure blocks that SHA; an interrupted trial or a failed remote recheck can be retried.
 Recovery still needs the installed toolchain, dependency cache and
 local PostgreSQL image (or access to download missing artifacts).
 A rollback hold survives restarts; it still lets the timer restore the held

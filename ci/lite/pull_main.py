@@ -291,10 +291,13 @@ class Target:
         require(ref == MAIN, "Unexpected remote main response")
         return valid_sha(tip) == sha
 
-    def eligible(self, sha: str) -> Release:
-        ci = subprocess.check_output(
+    def verify_ci(self, sha: str) -> str:
+        return subprocess.check_output(
             [sys.executable, "-I", str(VERIFIER), sha], env={}, text=True, timeout=30
         ).strip()
+
+    def eligible(self, sha: str) -> Release:
+        ci = self.verify_ci(sha)
         require(self.main_matches(sha), "main moved during CI verification; retry next poll")
         return {"sha": sha, "ci": ci}
 
@@ -441,8 +444,12 @@ class Target:
             self.recover(current)
             raise
         if not rollback:
-            # A failed remote read is not a candidate failure either. Leave it retriable.
+            # A stale or unreadable gate leaves the candidate retriable.
             try:
+                require(
+                    self.verify_ci(release["sha"]) == release["ci"],
+                    "CI proof changed during readiness; retry next poll",
+                )
                 still_tip = self.main_matches(release["sha"])
             except RECOVERY_ERRORS:
                 self.recover(current)

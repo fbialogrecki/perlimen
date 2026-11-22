@@ -394,9 +394,9 @@ the BFF also sends the internal token to the pinned loopback `/users` endpoint w
 - `deploy.yml` publishes on application/build-input pushes to `main`, not docs/`infra/` pushes.
   After exact-SHA `ci-ok`, Woodpecker tags six Harbor images with that SHA and opens a digest PR.
   Argo CD deploys on auto-merge. Reverting the digest PR does not reverse migrations.
-- The opt-in Lite timer trials only the CI-green main tip in a separate checkout and a private
-  network namespace with only Web, API and PostgreSQL forwarded on host loopback. It rechecks
-  main before promotion; failed trials retain the healthy checkout and synthetic store.
+- The opt-in Lite timer trials the CI-green main tip in a separate checkout and a private network
+  namespace with only Web, API and PostgreSQL forwarded on host loopback. After readiness it rechecks
+  the same CI proof, then main; failed trials retain the healthy checkout and synthetic store.
 
 ---
 

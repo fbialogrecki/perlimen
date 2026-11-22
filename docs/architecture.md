@@ -197,4 +197,5 @@ Application pushes to `main` publish images automatically and promote their dige
 The opt-in [Lite timer](runbooks/perlimen-lite.md#automatic-lite-deployment-dedicated-nuc-account)
 is separate from Argo CD. A trusted user service trials the CI-green `main` tip in an independent
 checkout and a private runtime network namespace. Only Web, API and PostgreSQL are forwarded to
-host loopback. Promotion rechecks remote `main`; recovery keeps the same private synthetic store.
+host loopback. After readiness, promotion rechecks the same CI proof, then remote `main`;
+recovery keeps the same private synthetic store.
