@@ -10,6 +10,7 @@ from events.api.routes import router as events_router
 from fastapi import APIRouter, Depends, FastAPI, HTTPException
 from media.api.routes import router as media_router
 from social.api.routes import router as social_router
+from social.owner import get_social_owner
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 from users.account_erasure import account_erasure_worker
@@ -28,6 +29,7 @@ from perlimen_common.health import ok
 from perlimen_lite.database import DOMAINS, endpoint, engine_for, migration_config, required, role
 from perlimen_lite.media_access import local_asset_lookup, media_access_router
 from perlimen_lite.media_storage import LocalMediaStorage
+from perlimen_lite.social import LiteSocialOwner
 from social import main_dependencies as social
 from users import main_dependencies as users
 
@@ -94,6 +96,8 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="Perlimen Lite", lifespan=lifespan)
     app.add_exception_handler(SessionAuthenticationError, session_authentication_error)
+    social_owner = LiteSocialOwner(factories["users"], factories["events"])
+    app.dependency_overrides[get_social_owner] = lambda: social_owner
 
     def local_upload_storage() -> LocalMediaStorage:
         if not storage.ready():

@@ -854,6 +854,10 @@ def resolve_profile_mention_target(
     _: Annotated[None, Depends(require_internal_token)],
     session: DbSession,
 ) -> MentionTargetResponse:
+    return profile_mention_target(session, handle)
+
+
+def profile_mention_target(session: Session, handle: str) -> MentionTargetResponse:
     user = session.scalar(
         select(ApplicationUser).where(
             ApplicationUser.username_normalized == normalize_username(handle),
@@ -886,6 +890,10 @@ def resolve_page_mention_target(
     _: Annotated[None, Depends(require_internal_token)],
     session: DbSession,
 ) -> MentionTargetResponse:
+    return page_mention_target(session, handle)
+
+
+def page_mention_target(session: Session, handle: str) -> MentionTargetResponse:
     page = session.scalar(select(Page).where(Page.slug == handle.lower()))
     if page is None:
         raise HTTPException(status_code=404, detail="mention target not found")
@@ -978,6 +986,12 @@ def create_internal_notification(
     _: Annotated[None, Depends(require_internal_token)],
     session: DbSession,
     response: Response,
+) -> NotificationResponse:
+    return receive_notification(session, payload, response)
+
+
+def receive_notification(
+    session: Session, payload: NotificationCreateRequest, response: Response
 ) -> NotificationResponse:
     recipient = session.get(ApplicationUser, payload.recipient_user_id)
     if recipient is None or recipient.status != "active":

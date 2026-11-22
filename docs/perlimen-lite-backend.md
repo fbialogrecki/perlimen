@@ -46,9 +46,16 @@ Lite sets and clears `threshold_refresh` at `/users/v1/auth`; standalone users
 uses `/v1/auth`. The BFF translates both paths to `/api/auth`, including clearing.
 
 The Lite launcher connects the BFF directly to the private listener, not to legacy services.
-Other cross-domain calls still need their own local bindings; legacy outbound URLs and NATS
-are disabled. The existing users erasure worker is registered with the users session factory,
-but end-to-end erasure is not enabled by this alone.
+Social reads follows and both directions of blocks through users-owned calls, using the users
+runtime role. It filters Feed candidates in SQL before applying the cursor and page limit, then
+batches interaction data for the resulting page. Group and thread reads and new interactions
+also honor blocks. Mentions and notification writes use the owner APIs without HTTP or NATS.
+The Lite migrator removes the legacy Social block projection under the Social migration role;
+Lite starts neither the subscriber nor the repair loop. Standalone keeps its existing transport.
+
+Other cross-domain integrations can still be unavailable: legacy outbound URLs/NATS are
+disabled in this process. The existing users erasure worker is registered with the users
+session factory, but end-to-end erasure is not enabled by this alone.
 The isolated smoke test asserts real PostgreSQL behavior, not whole-product readiness.
 
 ## Media
@@ -78,5 +85,7 @@ PERLIMEN_LITE_TEST_FRESH_POSTGRES=1 uv run --frozen pytest -q perlimen_lite/test
 ```
 
 The test rejects an already populated schema, runs the migration CLI twice,
-checks own-schema access and sibling/DDL denials, then exercises the composed app.
+checks own-schema access and sibling/DDL denials, then exercises the composed app. It
+compares SQL query counts for one versus multiple Feed posts and checks that the canonical
+block takes effect immediately with no Social projection table.
 It creates a synthetic account; destroy only that disposable test instance afterwards.

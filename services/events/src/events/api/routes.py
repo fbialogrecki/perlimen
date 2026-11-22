@@ -853,6 +853,10 @@ def list_event_updates(
 
 @router.get("/internal/v1/mention-targets/events/{slug}", response_model=MentionTargetResponse)
 def resolve_event_mention_target(slug: str, session: DbSession) -> MentionTargetResponse:
+    return event_mention_target(session, slug)
+
+
+def event_mention_target(session: Session, slug: str) -> MentionTargetResponse:
     event = _get_active_event(session, slug)
     return MentionTargetResponse(
         target_type="event",

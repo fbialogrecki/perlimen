@@ -248,6 +248,14 @@ class ProductContract(unittest.TestCase):
 
     def test_protected_feed_and_committed_block(self) -> None:
         viewer = self.account("viewer")
+        viewer.cookies.clear()
+        self.call(
+            viewer,
+            "POST",
+            "/api/auth/login",
+            200,
+            json={"emailOrUsername": self.username("viewer"), "password": self.password},
+        )
         author = self.account("author")
         unblocked = self.account("organizer")
         anon = self.client()
@@ -309,6 +317,14 @@ class ProductContract(unittest.TestCase):
         self.assertIn(blocked_post["id"], before)
         self.assertIn(control_text, before_app.rendered)
         self.assertIn(blocked_text, before_app.rendered)
+        first = self.call(viewer, "GET", f"{FEED}&limit=1", 200).json()
+        self.assertEqual([post["id"] for post in first["items"]], [blocked_post["id"]])
+        cursor = first["next_before"]
+        self.assertTrue(cursor)
+        second = self.call(
+            viewer, "GET", FEED, 200, params={"filter": "posts", "before": cursor, "limit": 1}
+        ).json()
+        self.assertEqual([post["id"] for post in second["items"]], [control_id])
 
         self.call(viewer, "POST", "/api/blocks", 201, json={"username": self.username("author")})
         after = ids()  # The first read must use the committed policy, without waiting or retries.
@@ -323,6 +339,12 @@ class ProductContract(unittest.TestCase):
         for marker in (blocked_text, blocked_post["id"], followed_text, followed_post["id"]):
             with self.subTest(contract="first SSR Feed response after block", marker=marker):
                 self.assertFalse(marker in after_app.html, "SSR exposed a blocked post")
+        after_page = self.call(viewer, "GET", f"{FEED}&limit=1", 200).json()
+        self.assertEqual([post["id"] for post in after_page["items"]], [control_id])
+        continuation = self.call(
+            viewer, "GET", FEED, 200, params={"filter": "posts", "before": cursor}
+        ).json()
+        self.assertNotIn(followed_post["id"], {post["id"] for post in continuation["items"]})
         self.call(author, "GET", f"/posts/{followed_post['id']}", 200)
 
     def assert_session_cookies(self, response: httpx.Response) -> None:
