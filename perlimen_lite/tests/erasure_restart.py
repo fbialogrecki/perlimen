@@ -74,14 +74,14 @@ def serve_lite(client: httpx.Client, port: int) -> Iterator[subprocess.Popen[byt
             process.wait(timeout=5)
 
 
-def delete_ahead_of_follow(
+def order_user_writes(
     engine: Engine,
-    owner_id: str,
-    owner: httpx.Client,
-    follow: Callable[[], httpx.Response],
-) -> None:
+    user_id: str,
+    first: Callable[[], httpx.Response],
+    second: Callable[[], httpx.Response],
+) -> tuple[httpx.Response, httpx.Response]:
     with ThreadPoolExecutor(max_workers=2) as pool, Session(engine) as holder:
-        lock_user_write_domains(holder, [owner_id])
+        lock_user_write_domains(holder, [user_id])
         try:
 
             def wait_for_waiters(count: int) -> None:
@@ -98,17 +98,69 @@ def delete_ahead_of_follow(
 
                 wait_until(waiting, timeout=2)
 
-            # Lite has two Users connections. Queue DELETE first, then prove
-            # the follow waits on the same lock before allowing DELETE to commit.
-            deletion = pool.submit(owner.delete, "/users/v1/me", timeout=15)
+            # Queue each HTTP write on the same transaction lock in a known order.
+            earlier = pool.submit(first)
             wait_for_waiters(1)
-            request = pool.submit(follow)
+            later = pool.submit(second)
             wait_for_waiters(2)
         finally:
             holder.rollback()
-        assert deletion.result(timeout=15).status_code == 202
-        response = request.result(timeout=15)
-        assert response.status_code == 404, response.text
+        return earlier.result(timeout=15), later.result(timeout=15)
+
+
+def check_residency_role_changes(
+    engine: Engine,
+    page_owner: httpx.Client,
+    admin: httpx.Client,
+    admin_id: str,
+    member_path: str,
+    invite_path: str,
+    artist_id: str,
+) -> None:
+    def invite() -> httpx.Response:
+        return admin.post(invite_path, timeout=15)
+
+    for change, expected_status in (
+        (lambda: page_owner.put(member_path, json={"role": "editor"}, timeout=15), 200),
+        (lambda: page_owner.delete(member_path, timeout=15), 204),
+    ):
+        assert page_owner.put(member_path, json={"role": "admin"}).status_code == 200
+        changed, denied = order_user_writes(engine, admin_id, change, invite)
+        assert changed.status_code == expected_status, changed.text
+        assert denied.status_code == 403, denied.text
+        with Session(engine) as session:
+            assert (
+                session.scalar(
+                    select(PageResidency.id).where(PageResidency.artist_user_id == artist_id)
+                )
+                is None
+            )
+            assert (
+                session.scalar(
+                    select(NotificationEvent.id).where(
+                        NotificationEvent.user_id == artist_id,
+                        NotificationEvent.event_type == "residency.invited",
+                    )
+                )
+                is None
+            )
+            assert (
+                session.scalar(
+                    select(SafetyAuditLog.id).where(
+                        SafetyAuditLog.actor_user_id == admin_id,
+                        SafetyAuditLog.action == "residency.invited",
+                    )
+                )
+                is None
+            )
+
+    assert page_owner.put(member_path, json={"role": "admin"}).status_code == 200
+    allowed = invite()
+    assert allowed.status_code == 201, allowed.text
+    with Session(engine) as session:
+        residency = session.get(PageResidency, allowed.json()["id"])
+        assert residency is not None
+        assert (residency.artist_user_id, residency.invited_by_user_id) == (artist_id, admin_id)
 
 
 def check_erasure_restart(root: Path) -> None:
@@ -176,7 +228,7 @@ def check_erasure_restart(root: Path) -> None:
                 principal = register(owner, username)
                 owner_id = principal["X-Threshold-User-Id"]
                 control = register(other, "erasure-control")
-                register(blocker, "erasure-blocker")
+                blocker_identity = register(blocker, "erasure-blocker")
                 assert second_session.post(f"{auth}/login", json=login).status_code == 200
                 page = other.post(
                     "/users/v1/pages",
@@ -248,16 +300,18 @@ def check_erasure_restart(root: Path) -> None:
                 assert before.status_code == 200 and before.json()["author_user_id"] == owner_id
 
                 root.chmod(0o755)
-                delete_ahead_of_follow(
+                deletion, delayed_follow = order_user_writes(
                     users_engine,
                     owner_id,
-                    owner,
+                    lambda: owner.delete("/users/v1/me", timeout=15),
                     lambda: other.post(
                         user_follows,
                         json={"target_type": "artist", "target_handle": username},
                         timeout=15,
                     ),
                 )
+                assert deletion.status_code == 202, deletion.text
+                assert delayed_follow.status_code == 404, delayed_follow.text
                 assert blocker.post(blocks, json={"username": username}).status_code == 404
                 assert other.post(invite).status_code == 404
                 assert other.put(members, json={"role": "editor"}).status_code == 404
@@ -386,6 +440,19 @@ def check_erasure_restart(root: Path) -> None:
                 assert all(
                     marker not in after.text + replies.text
                     for marker in (owner_id, username, asset_id)
+                )
+
+                # Use the surviving control Page and a different artist after erasure checks.
+                artist = register(owner, "residency-control")
+                assert owner.post("/users/v1/me/artist", json={"role": "DJ"}).status_code == 200
+                check_residency_role_changes(
+                    users_engine,
+                    other,
+                    blocker,
+                    blocker_identity["X-Threshold-User-Id"],
+                    f"/users/v1/pages/{username}/members/erasure-blocker",
+                    f"/users/v1/pages/{username}/residencies/residency-control/invite",
+                    artist["X-Threshold-User-Id"],
                 )
     finally:
         root.chmod(0o700)

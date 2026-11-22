@@ -329,14 +329,14 @@ def _require_page_owner(page: Page, user_id: str) -> None:
     raise HTTPException(status_code=403, detail="page owner role required")
 
 
-def _require_page_owner_or_admin(page: Page, user_id: str) -> None:
-    for membership in page.memberships:
-        if membership.user_id == user_id and membership.role in {
-            PageMembershipRole.owner,
-            PageMembershipRole.admin,
-        }:
-            return
-    raise HTTPException(status_code=403, detail="page owner/admin role required")
+def _require_page_owner_or_admin(session: Session, page_id: str, user_id: str) -> None:
+    role = session.scalar(
+        select(PageMembership.role).where(
+            PageMembership.page_id == page_id, PageMembership.user_id == user_id
+        )
+    )
+    if role not in {PageMembershipRole.owner, PageMembershipRole.admin}:
+        raise HTTPException(status_code=403, detail="page owner/admin role required")
 
 
 def _artist_ref(user: ApplicationUser) -> PublicArtistRefResponse:
@@ -1890,8 +1890,10 @@ def invite_page_residency(
     page = session.scalar(select(Page).where(Page.slug == slug))
     if page is None:
         raise HTTPException(status_code=404, detail="page not found")
-    _require_page_owner_or_admin(page, user.id)
+    _require_page_owner_or_admin(session, page.id, user.id)
     artist = _fence_user_by_username(session, user.id, username, detail="artist not found")
+    # Membership changes take the same actor lock; only the role under that lock authorizes.
+    _require_page_owner_or_admin(session, page.id, user.id)
     if artist.artist_profile is None:
         raise HTTPException(status_code=404, detail="artist not found")
     if artist.id == user.id:

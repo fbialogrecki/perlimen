@@ -160,8 +160,8 @@ name (namespace, env var prefix, headers, cookies, buckets). See `docs/rebrandin
   `project`, `festival`), city, about text, links and avatar. Roles are `owner`, `admin`,
   `editor`, enforced in `users`: any role edits the Page and lists members, owners add,
   change and remove members.
-- Residencies: a Page owner or admin invites an artist; the artist accepts or rejects
-  (`/v1/me/residencies/{id}/accept|reject`).
+- Residencies: only a current Page owner or admin can invite an artist; the role is checked
+  under the account write lock. Artists accept or reject (`/v1/me/residencies/{id}/accept|reject`).
 - Follows target artist profiles, consumer profiles or Pages (`/v1/me/follows`). Event
   follows live in `events`.
 
