@@ -120,11 +120,14 @@ This is not a permanent deployment mechanism or a replacement for legacy CI/CD.
 The optional user timer polls the public Perlimen repository every five minutes.
 It considers only the observed `main` tip, then requires the existing GitHub
 Actions workflow's successful **main-push** `ci-ok` for that exact SHA and run
-attempt, which includes the security scans. After readiness it requires the same
-successful proof, then rechecks the `main` tip. A green PR, changed proof or tip,
-or unreadable response cannot authorize promotion. Intermediate pushes can be
-superseded. No new workflow, webhook, runner, or deployment credential is needed;
-Woodpecker, Harbor and Argo CD are unchanged.
+attempt, which includes the security scans. After reading the exact attempt's
+jobs, the verifier reads the latest exact main-push run again and requires the
+same run and attempt to still be green. After readiness the controller requires
+the same successful proof as before the trial, then rechecks the `main` tip.
+A green PR, changed proof or tip, or unreadable response cannot authorize
+promotion. Intermediate pushes can be superseded. No new workflow, webhook,
+runner, or deployment credential is needed; Woodpecker, Harbor and Argo CD are
+unchanged.
 
 ### Coordinator setup
 
@@ -165,9 +168,10 @@ checkouts remain available for recovery. The service keeps the same private
 PostgreSQL/media store across switches. No two polls or rollbacks run concurrently.
 `release.json` records current/previous checkout, SHA and CI evidence. After
 checking the namespace, listener PIDs, running checkout, Web `/` and API `/readyz`,
-the controller reads remote `main` again before promoting. A changed or unreadable
-tip restores the last healthy release (or stops the first trial) without rejecting
-the candidate SHA. Synthetic BFF login is a separate operator acceptance check.
+the controller revalidates the CI proof and finally reads remote `main` before
+promoting. Changed or unavailable proof or tip restores the last healthy release
+(or stops the first trial) without promotion, blocking the candidate SHA, or
+setting a hold. Synthetic BFF login is a separate operator acceptance check.
 
 ### Verify, roll back and stop
 
