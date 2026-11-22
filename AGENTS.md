@@ -167,6 +167,7 @@ Service ownership and shipped MVP state live in `PROJECT_SPECIFICATION.md` §5.2
 - Keep migrations inside the package at `services/<svc>/src/<pkg>/migrations` so they ship in the wheel. Address them as `<pkg>:migrations`, never via `__file__` or the working directory: the image installs with `--no-editable`, so the service directory does not exist at runtime.
 - Every `migrate.py` is identical apart from the package name and builds its Alembic `Config` in code; `alembic.ini` is for the CLI only, so logger levels live in `migrate.py`.
 - Migration Jobs run `python -m <svc>.migrate`. `uv` is build-time only (the app user cannot write `HOME`); the venv is first on `PATH`.
+- Lite is opt-in and uses a dedicated local PostgreSQL instance only. Its [backend contract](docs/perlimen-lite-backend.md) defines the entrypoint, role-scoped migrations and private router prefixes. Never point it at CNPG or pass a session across domains.
 - A failed migration hook must stay loud. GitOps keeps the failed Job (`hook-delete-policy: HookSucceeded`, without `BeforeHookCreation`), which turns the application Degraded and blocks the next sync until someone looks. An application can report Synced/Healthy while its sync operation failed, so never treat those two columns as proof that migrations ran.
 - Use Postgres for relational work. Do not move joins or filtering into Python when SQL is the right tool.
 - Use NATS request/reply for synchronous internal calls and pub/sub for non-critical events.

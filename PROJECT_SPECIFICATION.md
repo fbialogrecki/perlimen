@@ -3,10 +3,10 @@
 | Field | Value |
 | --- | --- |
 | **Status** | Accepted — describes shipped behavior |
-| **Version** | 1.1.0 |
+| **Version** | 1.2.0 |
 | **Owner** | Engineering |
-| **Last updated** | 2026-11-16 |
-| **Verified against** | `apps/web/src/`, `apps/web/package.json`, `services/*/src/`, `libs/py/perlimen_common/`, `infra/argocd/`, `infra/kustomize/`, `.github/workflows/ci.yml`, `.woodpecker/`, `Taskfile.yml`, `pyproject.toml` |
+| **Last updated** | 2026-11-22 |
+| **Verified against** | `apps/web/src/`, `apps/web/package.json`, `services/*/src/`, `libs/py/perlimen_common/`, `perlimen_lite/`, `infra/argocd/`, `infra/kustomize/`, `.github/workflows/ci.yml`, `.woodpecker/`, `Taskfile.yml`, `pyproject.toml` |
 
 ## Purpose of this file
 
@@ -54,26 +54,26 @@ Keep this map correct: line ranges shift whenever content is added or removed.
 | **5** | **System context** — you need the repo layout or the ownership split | 298-336 |
 | 5.1 | Repository layout | 300-320 |
 | 5.2 | Service ownership | 321-336 |
-| **6** | **Architecture** — touching runtime, service transports, CI/CD or GitOps | 337-381 |
-| 6.1 | Runtime | 339-356 |
-| 6.2 | Service-to-service transports | 357-368 |
-| 6.3 | Build, publication and deployment | 369-381 |
-| **7** | **Security** — touching auth, trust boundaries, secrets or headers | 382-399 |
-| **8** | **Privacy and data retention** — touching personal data, deletion or backups | 400-413 |
-| **9** | **Data model** — changing tables or migrations | 414-450 |
-| 9.1 | users | 419-429 |
-| 9.2 | social | 430-435 |
-| 9.3 | events | 436-443 |
-| 9.4 | media | 444-450 |
-| **10** | **API contract** — adding or changing an endpoint | 451-530 |
-| 10.1 | Conventions | 453-458 |
-| 10.2 | users | 459-480 |
-| 10.3 | social | 481-494 |
-| 10.4 | events | 495-510 |
-| 10.5 | media and auth-gateway | 511-517 |
-| 10.6 | Web BFF | 518-530 |
-| **11** | **Test plan** — you need test locations, gates or CI jobs | 531-546 |
-| **12** | **References** — you need operational detail kept out of this file | 547-556 |
+| **6** | **Architecture** — touching runtime, service transports, CI/CD or GitOps | 337-388 |
+| 6.1 | Runtime | 339-363 |
+| 6.2 | Service-to-service transports | 364-375 |
+| 6.3 | Build, publication and deployment | 376-388 |
+| **7** | **Security** — touching auth, trust boundaries, secrets or headers | 389-406 |
+| **8** | **Privacy and data retention** — touching personal data, deletion or backups | 407-420 |
+| **9** | **Data model** — changing tables or migrations | 421-457 |
+| 9.1 | users | 426-436 |
+| 9.2 | social | 437-442 |
+| 9.3 | events | 443-450 |
+| 9.4 | media | 451-457 |
+| **10** | **API contract** — adding or changing an endpoint | 458-537 |
+| 10.1 | Conventions | 460-465 |
+| 10.2 | users | 466-487 |
+| 10.3 | social | 488-501 |
+| 10.4 | events | 502-517 |
+| 10.5 | media and auth-gateway | 518-524 |
+| 10.6 | Web BFF | 525-537 |
+| **11** | **Test plan** — you need test locations, gates or CI jobs | 538-553 |
+| **12** | **References** — you need operational detail kept out of this file | 554-563 |
 
 ---
 
@@ -353,6 +353,13 @@ service.
 - Public access: `cloudflared` (Argo CD app `threshold-cloudflared`) forwards to the web
   Service only. A separate webhook-only proxy (`threshold-woodpecker-webhook`) exposes the
   Woodpecker hook endpoint.
+
+The opt-in local backend (`perlimen_lite.main:app`) mounts the four product routers under
+`/users`, `/social`, `/events` and `/media` behind the internal token. Users still authenticates
+product sessions. One dedicated PostgreSQL database holds four isolated schemas, each with
+a separate Alembic ledger, migration login and non-owner runtime login. Root readiness checks
+the four heads and the private media directory. This backend does not replace the k3s deployment.
+See [Perlimen Lite backend](docs/perlimen-lite-backend.md) for the local configuration contract.
 
 ### 6.2 Service-to-service transports
 

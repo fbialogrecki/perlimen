@@ -6,6 +6,8 @@ The product and source are Perlimen. Deployed legacy identifiers are intentional
 
 ## Runtime
 
+The opt-in [Lite backend](perlimen-lite-backend.md) runs the same product routers in one local FastAPI process, with four isolated schemas in one dedicated PostgreSQL database. It does not change the deployed topology below.
+
 Perlimen runs on a single-node k3s cluster on the maintainer's home server. Manifests stay plain Kubernetes so a managed cluster can replace k3s later; no production cloud is provisioned yet.
 
 Application workloads, all in namespace `threshold`:

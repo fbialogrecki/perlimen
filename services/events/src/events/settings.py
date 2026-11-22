@@ -7,7 +7,7 @@ class Settings(ServiceSettings):
     service_name: str = "events"
     database_url: str = "sqlite+pysqlite:///:memory:"
 
-    users_base_url: str = "http://127.0.0.1:8001"
+    users_base_url: str | None = "http://127.0.0.1:8001"
     media_service_url: str | None = None
     social_service_url: str | None = None
     media_request_timeout_seconds: float = 1.5

@@ -3,8 +3,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException
 
 from perlimen_common.health import ok
 from perlimen_common.http_observability import instrument_http_observability
@@ -12,7 +11,7 @@ from perlimen_common.logging import configure_logging
 from perlimen_common.telemetry import configure_telemetry, instrument_fastapi
 from users import main_dependencies
 from users.account_erasure import account_erasure_worker
-from users.api.routes import SessionAuthenticationError, _clear_auth_cookies, router
+from users.api.routes import SessionAuthenticationError, router, session_authentication_error
 from users.db.readiness import check_database_ready
 from users.main_dependencies import create_schema_for_local_sqlite, settings
 from users.nats_server import UsersNatsServer
@@ -65,11 +64,7 @@ instrument_http_observability(app, service_name=settings.service_name)
 app.include_router(router)
 
 
-@app.exception_handler(SessionAuthenticationError)
-def session_authentication_error(_: Request, exc: SessionAuthenticationError) -> JSONResponse:
-    response = JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
-    _clear_auth_cookies(response)
-    return response
+app.add_exception_handler(SessionAuthenticationError, session_authentication_error)
 
 
 @app.get("/healthz")

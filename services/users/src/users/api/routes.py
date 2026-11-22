@@ -4,6 +4,7 @@ from collections import defaultdict, deque
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session, aliased
 from users.account_erasure import enqueue_account_erasure
@@ -236,6 +237,13 @@ def _set_auth_cookies(response: Response, *, session_token: str, refresh_token: 
 def _clear_auth_cookies(response: Response) -> None:
     response.delete_cookie(SESSION_COOKIE, path="/")
     response.delete_cookie(REFRESH_COOKIE, path="/v1/auth")
+
+
+def session_authentication_error(_: Request, exc: Exception) -> JSONResponse:
+    assert isinstance(exc, SessionAuthenticationError)
+    response = JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    _clear_auth_cookies(response)
+    return response
 
 
 def _validate_avatar_or_422(

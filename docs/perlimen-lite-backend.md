@@ -1,0 +1,64 @@
+# Perlimen Lite backend
+
+Lite is an opt-in local backend, not a change to the deployed stack. Run it in its own
+process from the checkout root after `uv sync --frozen`. No existing database or data
+volume can be used for initialization.
+
+## PostgreSQL and API
+
+On dedicated PostgreSQL storage, initialize database `perlimen_lite` with bootstrap
+login `lite_bootstrap`. For the Postgres image, these are `POSTGRES_DB` and
+`POSTGRES_USER`; `POSTGRES_PASSWORD` is the same value as `PERLIMEN_LITE_BOOTSTRAP_PASSWORD`.
+Publish Postgres to `127.0.0.1` only and keep its TCP authentication on SCRAM-SHA-256,
+not `trust`. Supply configuration outside git:
+
+| Variable | Consumer |
+| --- | --- |
+| `PERLIMEN_LITE_DATABASE_URL` = `postgresql://127.0.0.1:<port>/perlimen_lite` (no credentials or query parameters) | Migrator and API |
+| `PERLIMEN_LITE_{USERS,SOCIAL,EVENTS,MEDIA}_RUNTIME_PASSWORD` (one variable per domain) | Migrator and API |
+| `PERLIMEN_LITE_{USERS,SOCIAL,EVENTS,MEDIA}_MIGRATION_PASSWORD` (one variable per domain) | Migrator only |
+| `PERLIMEN_LITE_BOOTSTRAP_PASSWORD` | Migrator only |
+| `THRESHOLD_INTERNAL_TOKEN` | API, and the trusted BFF when connected |
+| `PERLIMEN_LITE_MEDIA_ROOT` | API; existing directory owned by the API user, mode `0700` |
+
+Generate distinct role passwords and reuse them on each start. The migrator does not
+rotate passwords. Invoke these commands in their respective environments:
+
+```sh
+.venv/bin/python -m perlimen_lite.migrate
+.venv/bin/python -m uvicorn perlimen_lite.main:app --host 127.0.0.1 --port 8000
+```
+
+The migrator provisions schemas and roles under a PostgreSQL advisory lock, then
+runs the packaged Alembic history once per domain from that domain's migration
+login. DDL and revision tracking commit per schema. Re-running continues from the
+recorded revisions. Runtime roles use only their domain's tables and read their
+Alembic ledger to check readiness; they cannot change the schema or ledger. IDs
+in other domains remain logical references, not cross-schema foreign keys. Do not
+pass a caller's SQLAlchemy session to another domain.
+
+The single app has `/healthz` and `/readyz`; the latter requires all four heads and a
+private media directory. Domain HTTP routes retain their payloads and authorization
+under `/users`, `/social`, `/events`, and `/media`. The Lite listener expects the
+internal token even on `/users`; this supplements, not replaces, product sessions
+and each router's own authorization. Do not expose the listener to browsers.
+
+This backend slice does not switch the BFF or forward requests to legacy services.
+Cross-domain operations that require transport replacement are not integrated;
+legacy outbound URLs/NATS are disabled in this process, and blob routes fail closed
+until local storage is wired. The existing users erasure worker is registered with
+the users session factory, but end-to-end erasure is not enabled by this alone.
+The isolated smoke test asserts real PostgreSQL behavior, not whole-product readiness.
+
+## Verify
+
+With a **fresh disposable instance**, supply the migrator and API variables above
+(the test supplies the media directory and internal token), then run:
+
+```sh
+PERLIMEN_LITE_TEST_FRESH_POSTGRES=1 uv run --frozen pytest -q perlimen_lite/tests
+```
+
+The test rejects an already populated schema, runs the migration CLI twice,
+checks own-schema access and sibling/DDL denials, then exercises the composed app.
+It creates a synthetic account; destroy only that disposable test instance afterwards.
