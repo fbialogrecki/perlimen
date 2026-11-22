@@ -9,6 +9,8 @@ logger = logging.getLogger(__name__)
 
 
 def check_page_role(settings: Settings, page_id: str, user_id: str) -> str | None:
+    if not settings.users_base_url:
+        return None
     try:
         page = quote(page_id, safe="")
         user = quote(user_id, safe="")
@@ -27,6 +29,8 @@ def check_page_role(settings: Settings, page_id: str, user_id: str) -> str | Non
 
 
 def get_artist_ref(settings: Settings, artist_user_id: str) -> dict[str, str] | None:
+    if not settings.users_base_url:
+        return None
     try:
         artist = quote(artist_user_id, safe="")
         resp = httpx.get(
@@ -53,7 +57,7 @@ def get_artist_ref(settings: Settings, artist_user_id: str) -> dict[str, str] | 
 
 def get_artist_refs(settings: Settings, artist_profile_ids: list[str]) -> dict[str, dict[str, str]]:
     ids = list(dict.fromkeys(artist_profile_ids))[:100]
-    if not ids:
+    if not ids or not settings.users_base_url:
         return {}
     try:
         resp = httpx.post(
@@ -83,7 +87,7 @@ def get_artist_refs(settings: Settings, artist_profile_ids: list[str]) -> dict[s
 
 def get_active_user_refs(settings: Settings, user_ids: list[str]) -> dict[str, dict[str, str]]:
     ids = list(dict.fromkeys(user_ids))
-    if not ids:
+    if not ids or not settings.users_base_url:
         return {}
     try:
         refs: dict[str, dict[str, str]] = {}
@@ -117,6 +121,8 @@ def get_active_user_refs(settings: Settings, user_ids: list[str]) -> dict[str, d
 
 
 def get_user_by_username(settings: Settings, username: str) -> dict[str, str] | None:
+    if not settings.users_base_url:
+        return None
     try:
         handle = quote(username, safe="")
         resp = httpx.get(
@@ -149,6 +155,8 @@ def notify_user(
     dedupe_key: str,
     metadata: dict[str, str | int | bool | None],
 ) -> bool:
+    if not settings.users_base_url:
+        return False
     try:
         resp = httpx.post(
             f"{settings.users_base_url.rstrip('/')}/internal/v1/notifications",

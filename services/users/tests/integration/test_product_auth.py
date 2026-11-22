@@ -220,6 +220,7 @@ def test_login_me_refresh_and_logout_use_opaque_hashed_cookies(session: Session)
     refresh_cookie = login.cookies.get("threshold_refresh")
     assert session_cookie
     assert refresh_cookie
+    assert client.cookies.get("threshold_refresh", path="/v1/auth") == refresh_cookie
     assert (
         session.scalar(select(UserSession).where(UserSession.session_token_hash == session_cookie))
         is None
@@ -245,11 +246,14 @@ def test_login_me_refresh_and_logout_use_opaque_hashed_cookies(session: Session)
     assert refresh.status_code == 200
     session.refresh(first_refresh_row)
     assert first_refresh_row.refresh_generation == first_generation + 1
-    assert refresh.cookies.get("threshold_refresh") != refresh_cookie
+    rotated = client.cookies.get("threshold_refresh", path="/v1/auth")
+    assert rotated and rotated != refresh_cookie
 
     logout = client.post("/v1/auth/logout")
     assert logout.status_code == 204
+    assert not client.cookies
     assert client.get("/v1/auth/me").status_code == 401
+    assert client.post("/v1/auth/refresh").status_code == 401
 
 
 def test_locked_account_session_and_refresh_are_rejected_and_cleared(

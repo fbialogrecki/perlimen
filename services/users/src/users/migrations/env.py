@@ -12,8 +12,9 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 
-settings = Settings()
-config.set_main_option("sqlalchemy.url", settings.database_url)
+provided_connection = config.attributes.get("connection")
+if provided_connection is None:
+    config.set_main_option("sqlalchemy.url", Settings().database_url)
 
 
 def run_migrations_offline() -> None:
@@ -24,6 +25,16 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
+    if provided_connection is not None:
+        context.configure(
+            connection=provided_connection,
+            target_metadata=target_metadata,
+            version_table_schema=config.attributes["version_table_schema"],
+        )
+        with context.begin_transaction():
+            context.run_migrations()
+        return
+
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
