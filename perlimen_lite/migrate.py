@@ -92,6 +92,9 @@ def upgrade(url: URL, domain: str) -> None:
         config = migration_config(domain)
         config.attributes.update(connection=conn, version_table_schema=domain)
         command.upgrade(config, "head")
+        if domain == "social":
+            # A legacy projection, not product data. Lite reads users directly.
+            conn.exec_driver_sql("DROP TABLE IF EXISTS social.user_blocks")
         conn.exec_driver_sql(
             f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {domain} TO {runtime}"
         )

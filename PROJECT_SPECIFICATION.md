@@ -37,43 +37,43 @@ Keep this map correct: line ranges shift whenever content is added or removed.
 | --- | --- | --- |
 | **1** | **Specification governance** — changing anything in this file | 80-90 |
 | **2** | **Vision and scope** — you need product framing or the MVP boundary | 91-109 |
-| **3** | **Functional requirements** — changing product behavior | 110-279 |
+| **3** | **Functional requirements** — changing product behavior | 110-282 |
 | 3.1 | Access model and web routes | 112-128 |
 | 3.2 | Accounts and authentication | 129-149 |
 | 3.3 | Identity, profiles, Pages and follows | 150-167 |
 | 3.4 | Groups, posts and comments | 168-178 |
-| 3.5 | Feed | 179-191 |
-| 3.6 | Events | 192-206 |
-| 3.7 | Guestlists and check-in | 207-222 |
-| 3.8 | Media | 223-235 |
-| 3.9 | Notifications | 236-244 |
-| 3.10 | Search and mentions | 245-253 |
-| 3.11 | Safety: blocks, reports, moderation | 254-264 |
-| 3.12 | Account erasure | 265-279 |
-| **4** | **Non-functional requirements** — touching limits, i18n, observability, health | 280-297 |
-| **5** | **System context** — you need the repo layout or the ownership split | 298-336 |
-| 5.1 | Repository layout | 300-320 |
-| 5.2 | Service ownership | 321-336 |
-| **6** | **Architecture** — touching runtime, service transports, CI/CD or GitOps | 337-388 |
-| 6.1 | Runtime | 339-363 |
-| 6.2 | Service-to-service transports | 364-375 |
-| 6.3 | Build, publication and deployment | 376-388 |
-| **7** | **Security** — touching auth, trust boundaries, secrets or headers | 389-406 |
-| **8** | **Privacy and data retention** — touching personal data, deletion or backups | 407-420 |
-| **9** | **Data model** — changing tables or migrations | 421-457 |
-| 9.1 | users | 426-436 |
-| 9.2 | social | 437-442 |
-| 9.3 | events | 443-450 |
-| 9.4 | media | 451-457 |
-| **10** | **API contract** — adding or changing an endpoint | 458-537 |
-| 10.1 | Conventions | 460-465 |
-| 10.2 | users | 466-487 |
-| 10.3 | social | 488-501 |
-| 10.4 | events | 502-517 |
-| 10.5 | media and auth-gateway | 518-524 |
-| 10.6 | Web BFF | 525-537 |
-| **11** | **Test plan** — you need test locations, gates or CI jobs | 538-553 |
-| **12** | **References** — you need operational detail kept out of this file | 554-563 |
+| 3.5 | Feed | 179-192 |
+| 3.6 | Events | 193-207 |
+| 3.7 | Guestlists and check-in | 208-223 |
+| 3.8 | Media | 224-236 |
+| 3.9 | Notifications | 237-245 |
+| 3.10 | Search and mentions | 246-254 |
+| 3.11 | Safety: blocks, reports, moderation | 255-267 |
+| 3.12 | Account erasure | 268-282 |
+| **4** | **Non-functional requirements** — touching limits, i18n, observability, health | 283-300 |
+| **5** | **System context** — you need the repo layout or the ownership split | 301-339 |
+| 5.1 | Repository layout | 303-323 |
+| 5.2 | Service ownership | 324-339 |
+| **6** | **Architecture** — touching runtime, service transports, CI/CD or GitOps | 340-392 |
+| 6.1 | Runtime | 342-366 |
+| 6.2 | Service-to-service transports | 367-379 |
+| 6.3 | Build, publication and deployment | 380-392 |
+| **7** | **Security** — touching auth, trust boundaries, secrets or headers | 393-410 |
+| **8** | **Privacy and data retention** — touching personal data, deletion or backups | 411-424 |
+| **9** | **Data model** — changing tables or migrations | 425-461 |
+| 9.1 | users | 430-440 |
+| 9.2 | social | 441-446 |
+| 9.3 | events | 447-454 |
+| 9.4 | media | 455-461 |
+| **10** | **API contract** — adding or changing an endpoint | 462-541 |
+| 10.1 | Conventions | 464-469 |
+| 10.2 | users | 470-491 |
+| 10.3 | social | 492-505 |
+| 10.4 | events | 506-521 |
+| 10.5 | media and auth-gateway | 522-528 |
+| 10.6 | Web BFF | 529-541 |
+| **11** | **Test plan** — you need test locations, gates or CI jobs | 542-557 |
+| **12** | **References** — you need operational detail kept out of this file | 558-567 |
 
 ---
 
@@ -179,9 +179,10 @@ name (namespace, env var prefix, headers, cookies, buckets). See `docs/rebrandin
 ### 3.5 Feed
 
 - The stream is named **Feed** and is chronological. There is no ranking.
-- `social` `GET /v1/feed` returns visible posts by followed users (from `users` over NATS)
-  and from the viewer's groups, excluding hidden posts and blocked authors, newest first with
-  `created_at|id` cursors (`filter=all|posts`).
+- `social` `GET /v1/feed` returns visible posts by followed users and from the viewer's
+  groups, excluding hidden posts and blocked authors, newest first with `created_at|id`
+  cursors (`filter=all|posts`). Lite reads follows and blocks from the `users` owner API,
+  filters before pagination and fetches interactions in batches, not per post.
 - The web app assembles the Feed in `apps/web/src/lib/feed/assembly.ts` from posts, event
   feed candidates, event updates and guestlist access notifications, with filters `all`,
   `posts`, `events` and `access`.
@@ -253,9 +254,11 @@ name (namespace, env var prefix, headers, cookies, buckets). See `docs/rebrandin
 
 ### 3.11 Safety: blocks, reports, moderation
 
-- `users` is the only writer of blocks (`/v1/me/blocks`). `social` keeps an enforcement copy,
-  fed by the NATS event `users.block.changed.v1` and reconciled every 300 seconds against
-  `users` `GET /internal/v1/blocks`.
+- `users` is the only writer of blocks (`/v1/me/blocks`). Lite has no Social enforcement copy
+  or reconciliation; the next Feed, group or thread read uses the committed registry in both
+  directions. New comments, votes and emoji respect block visibility. Mention policy checks
+  the resolved account ID. Standalone `social` keeps its NATS-fed projection and reconciles it
+  every 300 seconds with `users` `GET /internal/v1/blocks`.
 - Reports target `profile`, `page`, `post` or `comment`. Profile and Page reports go to
   `users`; the reported user and the Page's owners/admins see open reports. Post and comment
   reports go to `social`; the author of the reported content can set status
@@ -323,7 +326,7 @@ has `main.py`, `settings.py`, `api/`, `domain/`, `db/`, `migrations/` and a serv
 | Owner | Data and decisions |
 | --- | --- |
 | `users` | Accounts, credentials, sessions, verification/reset tokens, onboarding, consumer/artist profiles, Pages, memberships, residencies, follows, the canonical block registry, notifications, profile/Page reports, auth audit, account erasure orchestration |
-| `social` | Groups, memberships, posts, comments, mentions, votes, emoji reactions, event announcements, Feed, post/comment reports, block enforcement copy |
+| `social` | Groups, memberships, posts, comments, mentions, votes, emoji reactions, event announcements, Feed, post/comment reports, standalone-only block enforcement copy |
 | `events` | Events, updates, follows, boosts, guestlists, artist quotas, door staff, check-in tokens, access audit |
 | `media` | Media assets, derivatives, object keys and S3 writes |
 | `auth-gateway` | Authentik JWT validation for internal/admin surfaces; no product data |
@@ -365,8 +368,9 @@ See [Perlimen Lite backend](docs/perlimen-lite-backend.md) for the local configu
 
 | Transport | Flows |
 | --- | --- |
-| NATS request/reply | `users.current_profile.v1` (auth-gateway → users), `users.follow.list_following.v1` (social → users) |
-| NATS pub/sub | `users.block.changed.v1` (users → social) |
+| In-process owner API (Lite) | Social follows, blocks, mention resolution and user notifications; each call uses the owner's runtime login |
+| NATS request/reply (standalone) | `users.current_profile.v1` (auth-gateway → users), `users.follow.list_following.v1` (social → users) |
+| NATS pub/sub (standalone) | `users.block.changed.v1` (users → social) |
 | HTTP `/internal/v1/*` with `X-Threshold-Internal-Token` | Everything else: Page roles and artist lookups (events → users), notifications and mention lookups, event announcements (events → social), account erasure (users → social/events/media), media asset validation |
 
 The BFF sends `social`, `events` and `media` the internal token and session-derived identity
@@ -438,7 +442,7 @@ SQLAlchemy models live in `services/<svc>/src/<pkg>/domain/models.py`; Alembic m
 
 `groups`, `group_memberships`, `posts`, `event_announcements`, `post_mentions`, `comments`,
 `comment_mentions`, `reactions`, `comment_reactions`, `post_emoji_reactions`, `user_blocks`
-(enforcement copy), `safety_reports`, `safety_audit_logs`, `account_erasure_tombstones`.
+(standalone enforcement copy; absent in Lite), `safety_reports`, `safety_audit_logs`, `account_erasure_tombstones`.
 
 ### 9.3 events
 
