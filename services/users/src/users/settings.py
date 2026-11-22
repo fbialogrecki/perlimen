@@ -3,10 +3,10 @@ from typing import Literal, Self
 
 from pydantic import Field, field_validator, model_validator
 
-from perlimen_common.config import ServiceSettings
+from perlimen_common.media_client import MediaConsumerSettings
 
 
-class Settings(ServiceSettings):
+class Settings(MediaConsumerSettings):
     service_name: str = "users"
     database_url: str = "sqlite+pysqlite:///:memory:"
     nats_enabled: bool = False

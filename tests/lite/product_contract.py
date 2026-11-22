@@ -465,12 +465,19 @@ class ProductContract(unittest.TestCase):
         anon = self.client()
         self.upload(anon, "post_image", status=401)
         self.upload(owner, "post_image", status=422, mime="image/jpeg")
-        asset = self.upload(owner, "post_image").json()["id"]
+        payload = self.upload(owner, "post_image").json()
+        self.assertEqual(set(payload), {"id"})
+        asset = payload["id"]
         private = f"{UPLOAD}/assets/{asset}"
+        thumbnail = f"{private}/post_480.webp"
         denied = (401, 403, 404)
         for variant in ("post_480.webp", "original"):
             with self.subTest(unpublished=variant):
                 self.call(anon, "GET", f"{private}/{variant}", denied)
+        owner_preview = self.call(owner, "GET", thumbnail, 200)
+        self.assertIn("no-store", owner_preview.headers["cache-control"])
+        self.call(owner, "GET", f"{private}/original", 404)
+        self.call(other, "GET", thumbnail, 404)
         self.call(
             other,
             "POST",
@@ -484,7 +491,15 @@ class ProductContract(unittest.TestCase):
         post = self.post(owner, "Owned asset fixture", media_asset_ids=[asset])
         self.assertEqual(post["media_asset_ids"], [asset])
         with self.subTest(contract="attachment does not publish a session-gated image"):
-            self.call(anon, "GET", f"{private}/post_480.webp", denied)
+            self.call(anon, "GET", thumbnail, denied)
+        viewer_preview = self.call(other, "GET", thumbnail, 200)
+        self.assertEqual(viewer_preview.content, owner_preview.content)
+        self.call(other, "POST", "/api/blocks", 201, json={"username": self.username("author")})
+        self.call(other, "GET", thumbnail, 404)
+        self.call(owner, "GET", thumbnail, 200)
+        self.call(other, "DELETE", f"/api/blocks/{self.username('author')}", 204)
+        self.call(other, "GET", thumbnail, 200)
+
         avatar = self.avatar(owner)
         published = avatar.rsplit("/", 1)[0]
         for variant in ("original", "post_480.webp"):

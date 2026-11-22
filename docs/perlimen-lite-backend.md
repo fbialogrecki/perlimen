@@ -46,11 +46,25 @@ Lite sets and clears `threshold_refresh` at `/users/v1/auth`; standalone users
 uses `/v1/auth`. The BFF translates both paths to `/api/auth`, including clearing.
 
 The Lite launcher connects the BFF directly to the private listener, not to legacy services.
-Cross-domain operations that require transport replacement are not integrated;
-legacy outbound URLs/NATS are disabled in this process, and blob routes fail closed
-until local storage is wired. The existing users erasure worker is registered with
-the users session factory, but end-to-end erasure is not enabled by this alone.
+Other cross-domain calls still need their own local bindings; legacy outbound URLs and NATS
+are disabled. The existing users erasure worker is registered with the users session factory,
+but end-to-end erasure is not enabled by this alone.
 The isolated smoke test asserts real PostgreSQL behavior, not whole-product readiness.
+
+## Media
+
+Lite reuses the bounded upload and WebP pipeline. Store the media root outside the checkout
+and any public web root. The API writes each blob as a `0600` file under the `0700` media
+root and does not follow blob symlinks. PostgreSQL holds the owner, context, keys and status;
+backup/restore needs both the database and media directory. No S3 service, credentials or
+media worker are needed. Standalone media still uses S3.
+
+The browser gets an asset ID after upload. Through the BFF, owners can preview derivatives;
+other signed-in users can read visible post images unless either user blocked the other.
+Only avatars linked to public profiles or Pages and posters linked to non-deleted public
+events can be read anonymously. Originals are never served in Lite; all reads use `no-store`.
+The media-owned erasure stage revokes access, then removes originals and derivatives before
+dropping the inventory. A storage failure retains the inventory for retry.
 
 ## Verify
 

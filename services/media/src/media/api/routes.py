@@ -24,6 +24,7 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session, selectinload
 
 router = APIRouter()
+legacy_router = APIRouter()
 logger = logging.getLogger(__name__)
 _OWNER_WRITE_FENCE_SEED = 42002
 
@@ -114,7 +115,7 @@ def _rollback_failed_upload(
             logger.warning("Failed to delete media upload object during rollback", exc_info=True)
 
 
-@router.post(
+@legacy_router.post(
     "/v1/assets",
     response_model=MediaAssetRead,
     status_code=status.HTTP_201_CREATED,
@@ -218,7 +219,7 @@ async def upload_asset(
                 bucket=settings.s3_bucket,
                 object_keys=cleanup_keys,
             )
-            if isinstance(exc, ClientError):
+            if isinstance(exc, (ClientError, OSError)):
                 raise HTTPException(status_code=503, detail="media storage unavailable") from exc
             raise
         loaded_asset = session.get(
@@ -231,7 +232,7 @@ async def upload_asset(
         return loaded_asset
 
 
-@router.get(
+@legacy_router.get(
     "/v1/config/storage",
     response_model=StorageConfigRead,
     dependencies=[Depends(require_internal_token)],
@@ -307,7 +308,9 @@ def erase_account_data(
     return AccountErasureResponse()
 
 
-@router.get("/media/assets/{asset_path:path}", dependencies=[Depends(require_internal_token)])
+@legacy_router.get(
+    "/media/assets/{asset_path:path}", dependencies=[Depends(require_internal_token)]
+)
 def read_asset_object(
     asset_path: str,
     storage: Annotated[ObjectStorage, Depends(get_object_storage)],
