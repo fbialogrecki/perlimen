@@ -45,7 +45,14 @@ would otherwise load and does not inherit legacy service configuration. It does
 not enable remote email, telemetry or object storage. The launcher sets
 `PERLIMEN_LITE_API_PORT` for the BFF so product-auth requests send the internal
 token only to `http://127.0.0.1:<port>/users` and never follow redirects. The
-standalone users service does not use this mode.
+standalone users service does not use this mode. The launcher sets `NEXTAUTH_URL`
+to the loopback web origin for the exact Origin check and absolute Open Graph
+image URLs. This variable does not enable Authentik or any other login provider.
+SMTP is off by default. For synthetic accounts on a disposable checkout only,
+set `PERLIMEN_LITE_SMTP_CAPTURE_PORT` at start to the port of a non-relaying SMTP
+sink bound to `127.0.0.1`. Lite uses no SMTP credentials and builds both reset
+and verification links from the Next.js origin, including the selected web port.
+Stop before changing this setting. Never forward captured mail or use real accounts.
 
 The default Lite start runs only Next.js, the Lite API and PostgreSQL: no Tempo,
 OTLP export, Grafana datasource, Mimir, Loki, Grafana, Alloy, Collector or
@@ -69,3 +76,18 @@ start preserves the running PID, and login returns the same account after
 stop/start. The test checks listener/cgroup cleanup and leaves the isolated volume
 stopped, not deleted. It does not test browser cookie handling, refresh rotation
 or media uploads.
+
+For the reset regression, use a separate fresh disposable checkout with locked web
+dependencies and a Python environment with Playwright and its Chromium installed:
+
+```bash
+python -m playwright install chromium
+python ops/tests/lite-reset-smoke.py --disposable
+```
+
+The test supplies an in-memory loopback SMTP sink, starts Lite on a nondefault
+web port, and opens the exact mailed verification and reset links in Chromium.
+It submits the real reset form and verifies single use, session revocation and
+login with the new password. After shutdown it checks the unit journal and any
+Next dev trace/log artifacts for both credentials, reporting only counts and
+booleans. The disposable database remains stopped, not deleted.

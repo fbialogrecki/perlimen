@@ -364,7 +364,7 @@ def register_user(
         subject="Verify your email address",
         body=(
             f"Please verify your email address by visiting the following link:\n"
-            f"https://{settings.web_host}/verify-email?token={verification_token}"
+            f"{settings.web_origin}/verify-email?token={verification_token}"
         ),
     )
     return user, session_token, refresh_token, verification_token
@@ -601,7 +601,7 @@ def request_email_verification(session: Session, settings: Settings, user: Appli
         subject="Verify your email address",
         body=(
             f"Please verify your email address by visiting the following link:\n"
-            f"https://{settings.web_host}/verify-email?token={token}"
+            f"{settings.web_origin}/verify-email?token={token}"
         ),
     )
     return token
@@ -649,7 +649,7 @@ def request_password_reset(session: Session, settings: Settings, email: str) -> 
             subject="Reset your password",
             body=(
                 f"Please reset your password by visiting the following link:\n"
-                f"https://{settings.web_host}/reset-password?token={token}"
+                f"{settings.web_origin}/reset-password?token={token}"
             ),
         )
     return token

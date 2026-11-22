@@ -52,7 +52,7 @@ Environment variables use the `THRESHOLD_` prefix.
 - `THRESHOLD_SMTP_USERNAME` — Resend SMTP username, normally `resend`.
 - `THRESHOLD_SMTP_PASSWORD` — Resend API key used as the SMTP password.
 - `THRESHOLD_SMTP_FROM` — verified sender address, for example `Perlimen <no-reply@example.com>`.
-- `THRESHOLD_WEB_HOST` — public web host used in email verification and password reset links, without scheme.
+- `THRESHOLD_WEB_HOST` — public web host (without scheme) for HTTPS verification and reset links. Local/test SMTP capture can supply an explicit `http://127.0.0.1:<port>` origin instead.
 
 Cluster email runtime reads `THRESHOLD_SMTP_ENABLED`, `THRESHOLD_SMTP_USERNAME`, `THRESHOLD_SMTP_PASSWORD`, `THRESHOLD_SMTP_FROM`, and `THRESHOLD_WEB_HOST` from OpenBao path `threshold/users/email` via `ExternalSecret/users-email`.
 

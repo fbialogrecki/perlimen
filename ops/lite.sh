@@ -25,7 +25,8 @@ case ${1:-} in
             --property="RuntimeDirectory=$instance" --property=RuntimeDirectoryMode=0700 \
             --setenv="PATH=$PATH" --expand-environment=no \
             bash -p "$root/ops/lite.sh" run "${PERLIMEN_LITE_WEB_PORT:-3300}" \
-            "${PERLIMEN_LITE_API_PORT:-3800}" "${PERLIMEN_LITE_PG_PORT:-55432}" ||
+            "${PERLIMEN_LITE_API_PORT:-3800}" "${PERLIMEN_LITE_PG_PORT:-55432}" \
+            "${PERLIMEN_LITE_SMTP_CAPTURE_PORT:-}" ||
             fail "Startup failed; see journalctl --user -u $unit -e."
         exit 0
         ;;
@@ -49,12 +50,16 @@ done < <(compgen -e)
 umask 077
 export TMPDIR="$RUNTIME_DIRECTORY"
 host=127.0.0.1
-web_port=$2 api_port=$3 pg_port=$4
+web_port=$2 api_port=$3 pg_port=$4 smtp_port=${5:-}
+valid_port() { [[ $1 =~ ^[1-9][0-9]{3,4}$ ]] && (( $1 >= 1024 && $1 <= 65535 )); }
 for port in "$web_port" "$api_port" "$pg_port"; do
-    [[ $port =~ ^[1-9][0-9]{3,4}$ ]] && (( port >= 1024 && port <= 65535 )) || fail 'Invalid port.'
+    valid_port "$port" || fail 'Invalid port.'
+    [[ $port != "$smtp_port" ]] || fail 'Use a separate port for the SMTP capture sink.'
     [[ -z $(ss -H -ltn "sport = :$port") ]] || fail "Port $port is in use. Choose another Lite port."
 done
 [[ $web_port != "$api_port" && $web_port != "$pg_port" && $api_port != "$pg_port" ]] || fail 'Use distinct ports.'
+[[ -z $smtp_port ]] || valid_port "$smtp_port" || fail 'Invalid SMTP capture port.'
+web_origin=http://$host:$web_port
 state=$(realpath -- "$STATE_DIRECTORY")
 [[ $state != "$root" && $state != "$root/"* ]] || fail 'State must be outside the checkout.'
 for file in apps/web/.env{,.local,.development,.development.local}; do
@@ -128,6 +133,10 @@ wait "$migration_pid" || fail 'Local migrations failed.'
 migration_pid=
 (
     api_env THRESHOLD_AUTH_PASSWORD_PEPPER_CURRENT THRESHOLD_AUTH_SESSION_TOKEN_HMAC_KEY
+    if [[ -n $smtp_port ]]; then
+        export THRESHOLD_SMTP_ENABLED=true THRESHOLD_SMTP_HOST="$host" THRESHOLD_SMTP_PORT="$smtp_port"
+        export THRESHOLD_WEB_HOST="$web_origin"
+    fi
     exec uv run --frozen --no-dev --python 3.13 python -m perlimen_lite.serve "$api_port"
 ) &
 api_pid=$!
@@ -140,6 +149,7 @@ await API "$api_pid" 45 "${http[@]}" "$api_url/readyz"
     export USERS_SERVICE_URL="$api_url/users" SOCIAL_SERVICE_URL="$api_url/social"
     export EVENTS_SERVICE_URL="$api_url/events" MEDIA_SERVICE_URL="$api_url/media"
     export PERLIMEN_LITE_API_PORT="$api_port"
+    export NEXTAUTH_URL="$web_origin"
     export PERLIMEN_LITE_BFF_LOG="$RUNTIME_DIRECTORY/bff.jsonl"
     : > "$PERLIMEN_LITE_BFF_LOG"
     export NODE_ENV=development NEXT_TELEMETRY_DISABLED=1 AUTH_COOKIE_SECURE=true WEB_TRUSTED_LAN_HTTP=false
@@ -150,7 +160,7 @@ await API "$api_pid" 45 "${http[@]}" "$api_url/readyz"
     exec bun ./node_modules/next/dist/bin/next dev --hostname "$host" --port "$web_port" >/dev/null 2>&1
 ) &
 web_pid=$!
-await web "$web_pid" 75 "${http[@]}" "http://$host:$web_port/"
+await web "$web_pid" 75 "${http[@]}" "$web_origin/"
 kill -0 "$pg_pid" "$api_pid" 2>/dev/null || fail 'A component exited during startup.'
 printf 'Web http://%s:%s · API %s · PostgreSQL %s:%s\n' "$host" "$web_port" "$api_url" "$host" "$pg_port"
 systemd-notify --ready --status="Web http://$host:$web_port/ · API $api_url/"

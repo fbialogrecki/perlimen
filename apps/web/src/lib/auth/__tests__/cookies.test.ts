@@ -3,15 +3,20 @@ import { describe, expect, it } from "bun:test"
 import { planAuthCookieMutations } from "@/lib/auth/cookie-policy"
 
 describe("planAuthCookieMutations", () => {
-  it("rewrites the refresh cookie path from /v1/auth to /api/auth", () => {
-    const [mutation] = planAuthCookieMutations(
-      ["threshold_refresh=abc123; Path=/v1/auth; HttpOnly; Max-Age=2592000"],
-      false,
+  it.each(["/v1/auth", "/users/v1/auth"])("bridges refresh issuance and clearing from %s", (path: string) => {
+    const [issued] = planAuthCookieMutations(
+      [`threshold_refresh=abc123; Path=${path}; HttpOnly; Max-Age=2592000`],
+      true,
     )
-    expect(mutation.name).toBe("threshold_refresh")
-    expect(mutation.value).toBe("abc123")
-    expect(mutation.path).toBe("/api/auth")
-    expect(mutation.maxAge).toBe(2592000)
+    const [cleared] = planAuthCookieMutations(
+      [`threshold_refresh=; Path=${path}; Max-Age=0`],
+      true,
+    )
+    expect(issued).toEqual({
+      name: "threshold_refresh", value: "abc123", path: "/api/auth",
+      httpOnly: true, secure: true, sameSite: "lax", maxAge: 2592000,
+    })
+    expect(cleared).toEqual({ ...issued, value: "", maxAge: 0 })
   })
 
   it("keeps the session cookie at root path", () => {

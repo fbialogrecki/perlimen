@@ -139,8 +139,8 @@ name (namespace, env var prefix, headers, cookies, buckets). See `docs/rebrandin
   and `/api/auth` at the BFF. Both cookies are HttpOnly, SameSite=Lax, and Secure when configured.
 - Email verification tokens expire after 24 hours, password reset tokens after 30 minutes.
   Tokens are never returned to the browser. Email is sent over SMTP when enabled; plaintext
-  SMTP is refused outside `local`/`test` environments. The cluster config targets Resend over
-  STARTTLS.
+  SMTP is refused outside `local`/`test` environments. Standalone email links use HTTPS. Lite
+  leaves SMTP off by default; opt-in loopback capture uses the actual local web origin in links.
 - Auth endpoints are rate limited per client IP and per subject (default 120 attempts per
   60 s); auth events are written to `auth_audit_logs` with keyed hashes of subject, IP and
   user agent.
@@ -392,7 +392,7 @@ the BFF also sends the internal token to the pinned loopback `/users` endpoint w
 - `social`, `events` and `media` require `X-Threshold-Internal-Token` on every route
   (constant-time compare; 503 when unconfigured) and trust user headers only after it.
   Standalone `users` requires it on `/internal/v1/*`; Lite also requires it on `/users/v1/*`.
-- BFF mutation routes reject cross-origin requests by `Origin` (`apps/web/src/lib/http/guard.ts`).
+- Lite BFF mutations require the exact configured public `Origin`; standalone checks its host.
 - The web proxy (`apps/web/src/proxy.ts`) sets CSP (`default-src 'self'`, no frames,
   `object-src 'none'`), `X-Content-Type-Options`, `X-Frame-Options: DENY`, `Referrer-Policy`,
   `Permissions-Policy`, and HSTS in production unless trusted LAN HTTP is configured.
