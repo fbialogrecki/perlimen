@@ -148,9 +148,17 @@ unchanged.
   up across logouts and reboots; the host operator can enable lingering for
   this account. The host needs outbound access for public GitHub and the locked
   dependency/image downloads, but no public or LAN listener or tunnel.
-- Check Python **as the dedicated account** before enabling intake. From its
-  private home, run `uv python find --no-python-downloads 3.13`. If missing,
-  install it for that account (`uv python install 3.13`) and repeat the lookup.
+- Check Python **as the dedicated account**, with its real private `HOME`, before
+  enabling intake. Use the timer's search path, not a login shell's virtualenv
+  or `UV_*` settings:
+
+  ```bash
+  cd "$HOME" || exit 1
+  lite_uv() { env -i HOME="$HOME" PATH="$HOME/.bun/bin:$HOME/.local/bin:/bin:/usr/bin" uv "$@"; }
+  lite_uv python find --no-python-downloads 3.13
+  ```
+
+  If missing, run `lite_uv python install 3.13` and repeat the lookup.
   Having `uv` on the system or Python in the maintainer's home is not enough:
   PostgreSQL can become ready before migrations discover the missing interpreter.
   If a trial was already rejected, leave its blocked SHA and data intact; the
