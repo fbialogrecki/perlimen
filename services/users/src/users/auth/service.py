@@ -14,6 +14,7 @@ from users.auth.hashing import (
     verify_password,
 )
 from users.auth.tokens import generate_opaque_token, keyed_hash, stable_hash
+from users.db.base import lock_user_write_domains
 from users.domain.identity import normalize_email, normalize_username
 from users.domain.models import (
     ApplicationUser,
@@ -370,6 +371,12 @@ def register_user(
     return user, session_token, refresh_token, verification_token
 
 
+def _active_user_for_auth_write(session: Session, user_id: str) -> ApplicationUser | None:
+    lock_user_write_domains(session, [user_id])
+    user = session.get(ApplicationUser, user_id, populate_existing=True)
+    return user if user is not None and user.status == "active" else None
+
+
 def authenticate_user(
     session: Session,
     settings: Settings,
@@ -394,7 +401,9 @@ def authenticate_user(
             & (ApplicationUser.identity_source == IdentitySource.product.value)
         )
     )
-    if user is None or user.credential is None or user.status != "active":
+    if user is not None:
+        user = _active_user_for_auth_write(session, user.id)
+    if user is None or user.credential is None:
         _dummy_verify_password(settings, password)
         audit(
             session,
@@ -562,7 +571,7 @@ def confirm_email_verification(session: Session, settings: Settings, token: str)
         and _is_expired(row.expires_at)
     ):
         raise AuthError("invalid verification token")
-    user = session.get(ApplicationUser, row.user_id)
+    user = _active_user_for_auth_write(session, row.user_id)
     if user is None:
         raise AuthError("invalid verification token")
     user.email_verified_at = now
@@ -616,6 +625,8 @@ def request_password_reset(session: Session, settings: Settings, email: str) -> 
         )
     )
     token: str | None = None
+    if user is not None:
+        user = _active_user_for_auth_write(session, user.id)
     if user is not None:
         token = generate_opaque_token()
         now = utc_now()
@@ -671,7 +682,7 @@ def confirm_password_reset(
         and _is_expired(row.expires_at)
     ):
         raise AuthError("invalid reset token")
-    user = session.get(ApplicationUser, row.user_id)
+    user = _active_user_for_auth_write(session, row.user_id)
     if user is None or user.credential is None:
         raise AuthError("invalid reset token")
     new_hash = hash_password(

@@ -5,7 +5,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, aliased
 from users.account_erasure import enqueue_account_erasure
 from users.api.schemas import (
@@ -71,6 +71,7 @@ from users.auth.service import (
     request_password_reset,
     revoke_session,
 )
+from users.db.base import lock_user_write_domains
 from users.domain.follows import (
     PAGE_FOLLOW_TARGET_TYPES,
     canonical_follow_target_type,
@@ -148,11 +149,7 @@ class SessionAuthenticationError(HTTPException):
 
 
 def _lock_active_user_write_domain(session: Session, user_id: str) -> ApplicationUser:
-    if session.bind is not None and session.bind.dialect.name == "postgresql":
-        session.execute(
-            text("select pg_advisory_xact_lock(hashtextextended(:user_id, 1431520594))"),
-            {"user_id": user_id},
-        )
+    lock_user_write_domains(session, [user_id])
     current = session.scalar(
         select(ApplicationUser)
         .where(ApplicationUser.id == user_id)
@@ -1006,6 +1003,10 @@ def create_internal_notification(
 def receive_notification(
     session: Session, payload: NotificationCreateRequest, response: Response
 ) -> NotificationResponse:
+    ids = [payload.recipient_user_id]
+    if payload.actor_user_id:
+        ids.append(payload.actor_user_id)
+    lock_user_write_domains(session, ids)
     recipient = session.get(ApplicationUser, payload.recipient_user_id)
     if recipient is None or recipient.status != "active":
         raise HTTPException(status_code=404, detail="recipient not found")

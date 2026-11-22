@@ -145,13 +145,12 @@ export async function PostCard({
   const viewerId = session?.user.id ?? null
   const href = profileHref(post.author)
   const name = profileName(post.author)
+  const avatar = <Avatar name={name} imageUrl={post.author.avatarUrl} />
 
   return (
     <article className="rounded-surface border border-border-gray bg-graphite/60 px-4 py-4 transition-colors hover:border-status-neutral-border sm:px-5 sm:py-5">
       <div className="flex gap-3">
-        <Link href={href}>
-          <Avatar name={name} imageUrl={post.author.avatarUrl} />
-        </Link>
+        {href ? <Link href={href}>{avatar}</Link> : avatar}
         <div className="min-w-0 flex-1">
           <PostBody
             postId={post.id}
@@ -162,12 +161,13 @@ export async function PostCard({
             redirectHomeOnDelete={redirectHomeOnDelete}
             identity={(
               <div className="flex min-w-0 flex-wrap items-baseline gap-x-2">
-                <Link
-                  href={href}
-                  className="truncate text-[15px] font-semibold text-raw-white hover:text-acid"
-                >
-                  {name}
-                </Link>
+                {href ? (
+                  <Link href={href} className="truncate text-[15px] font-semibold text-raw-white hover:text-acid">
+                    {name}
+                  </Link>
+                ) : (
+                  <span className="truncate text-[15px] font-semibold text-raw-white">{name}</span>
+                )}
                 <Link
                   href={`/posts/${post.id}`}
                   className="text-[13px] text-muted transition-colors hover:text-acid"
