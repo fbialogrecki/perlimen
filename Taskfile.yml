@@ -215,6 +215,16 @@ tasks:
     cmds:
       - task: web:dev
 
+  lite:start:
+    desc: Start the loopback-only Perlimen Lite dev stack
+    cmds:
+      - bash ops/lite.sh start
+
+  lite:stop:
+    desc: Stop Perlimen Lite and retain its local data
+    cmds:
+      - bash ops/lite.sh stop
+
   # ─── Docker / registry ────────────────────────────────────────────────
 
   docker:build:web:
