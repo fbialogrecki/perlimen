@@ -17,13 +17,14 @@ from media.api.schemas import (
 from media.api.security import require_internal_token, require_user_id
 from media.domain.models import AccountErasureTombstone, MediaAsset, MediaDerivative
 from media.images import InvalidImageError, process_image
-from media.main_dependencies import get_object_storage, get_session, settings
+from media.main_dependencies import get_object_storage, get_session, get_upload_storage, settings
 from media.storage import ObjectStorage
 from media.uploads import parse_multipart_upload, stream_request_to_file, validate_content_length
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session, selectinload
 
 router = APIRouter()
+legacy_router = APIRouter()
 logger = logging.getLogger(__name__)
 _OWNER_WRITE_FENCE_SEED = 42002
 
@@ -114,7 +115,7 @@ def _rollback_failed_upload(
             logger.warning("Failed to delete media upload object during rollback", exc_info=True)
 
 
-@router.post(
+@legacy_router.post(
     "/v1/assets",
     response_model=MediaAssetRead,
     status_code=status.HTTP_201_CREATED,
@@ -148,7 +149,7 @@ async def upload_asset(
     request: Request,
     owner_user_id: Annotated[str, Depends(require_user_id)],
     session: Annotated[Session, Depends(get_session)],
-    storage: Annotated[ObjectStorage, Depends(get_object_storage)],
+    storage: Annotated[ObjectStorage, Depends(get_upload_storage)],
 ) -> MediaAsset:
     validate_content_length(request, settings.max_upload_bytes)
     with TemporaryDirectory(dir=settings.upload_temp_dir, prefix="media-upload-") as temp_dir:
@@ -218,7 +219,7 @@ async def upload_asset(
                 bucket=settings.s3_bucket,
                 object_keys=cleanup_keys,
             )
-            if isinstance(exc, ClientError):
+            if isinstance(exc, (ClientError, OSError)):
                 raise HTTPException(status_code=503, detail="media storage unavailable") from exc
             raise
         loaded_asset = session.get(
@@ -231,7 +232,7 @@ async def upload_asset(
         return loaded_asset
 
 
-@router.get(
+@legacy_router.get(
     "/v1/config/storage",
     response_model=StorageConfigRead,
     dependencies=[Depends(require_internal_token)],
@@ -307,7 +308,9 @@ def erase_account_data(
     return AccountErasureResponse()
 
 
-@router.get("/media/assets/{asset_path:path}", dependencies=[Depends(require_internal_token)])
+@legacy_router.get(
+    "/media/assets/{asset_path:path}", dependencies=[Depends(require_internal_token)]
+)
 def read_asset_object(
     asset_path: str,
     storage: Annotated[ObjectStorage, Depends(get_object_storage)],

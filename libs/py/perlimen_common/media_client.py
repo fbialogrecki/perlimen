@@ -1,13 +1,10 @@
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
 
 import httpx
+from pydantic import PrivateAttr
 
-
-class MediaClientSettings(Protocol):
-    media_service_url: str | None
-    media_request_timeout_seconds: float
-    perlimen_internal_token: str | None
+from perlimen_common.config import ServiceSettings
 
 
 class MediaAssetValidationError(Exception):
@@ -22,7 +19,20 @@ class MediaAssetRef:
     status: str
 
 
-def get_media_asset(settings: MediaClientSettings, asset_id: str) -> MediaAssetRef:
+class MediaConsumerSettings(ServiceSettings):
+    media_service_url: str | None
+    media_request_timeout_seconds: float
+    perlimen_internal_token: str | None
+    _media_asset_lookup: Callable[[str], MediaAssetRef] | None = PrivateAttr(default=None)
+
+    def use_local_media(self, lookup: Callable[[str], MediaAssetRef]) -> None:
+        self._media_asset_lookup = lookup
+        self.media_service_url = None
+
+
+def get_media_asset(settings: MediaConsumerSettings, asset_id: str) -> MediaAssetRef:
+    if settings._media_asset_lookup is not None:
+        return settings._media_asset_lookup(asset_id)
     if not settings.media_service_url or not settings.perlimen_internal_token:
         raise MediaAssetValidationError("media validation is not configured")
     try:
@@ -47,7 +57,7 @@ def get_media_asset(settings: MediaClientSettings, asset_id: str) -> MediaAssetR
 
 
 def validate_media_asset(
-    settings: MediaClientSettings, *, asset_id: str, owner_user_id: str, context: str
+    settings: MediaConsumerSettings, *, asset_id: str, owner_user_id: str, context: str
 ) -> None:
     asset = get_media_asset(settings, asset_id)
     if asset.owner_user_id != owner_user_id:

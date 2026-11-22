@@ -1,8 +1,6 @@
 """One local API; each router keeps its own schema, session and authorization."""
 
 import asyncio
-import os
-import stat
 from collections.abc import AsyncIterator, Callable, Generator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -29,6 +27,8 @@ from events import main_dependencies as events
 from media import main_dependencies as media
 from perlimen_common.health import ok
 from perlimen_lite.database import DOMAINS, endpoint, engine_for, migration_config, required, role
+from perlimen_lite.media_access import local_asset_lookup, media_access_router
+from perlimen_lite.media_storage import LocalMediaStorage
 from perlimen_lite.social import LiteSocialOwner
 from social import main_dependencies as social
 from users import main_dependencies as users
@@ -51,28 +51,11 @@ def database_session(factory: sessionmaker[Session]) -> SessionDependency:
     return acquire
 
 
-def private_media_ready(root: Path) -> bool:
-    try:
-        info = root.lstat()
-    except OSError:
-        return False
-    return (
-        stat.S_ISDIR(info.st_mode)
-        and stat.S_IMODE(info.st_mode) == 0o700
-        and info.st_uid == os.getuid()
-        and os.access(root, os.R_OK | os.W_OK | os.X_OK)
-    )
-
-
-def unavailable_blob_storage() -> None:
-    # Do not reach the legacy S3 endpoint; the local adapter is a separate slice.
-    raise HTTPException(status_code=503, detail="local blob storage is not configured")
-
-
 def create_app() -> FastAPI:
     url = endpoint()
     required("THRESHOLD_INTERNAL_TOKEN")
     media_root = Path(required("PERLIMEN_LITE_MEDIA_ROOT")).absolute()
+    storage = LocalMediaStorage(media_root)
     engines = {domain: engine_for(url, domain, "runtime") for domain in DOMAINS}
     factories = {
         d: sessionmaker(bind=engine, expire_on_commit=False) for d, engine in engines.items()
@@ -84,9 +67,12 @@ def create_app() -> FastAPI:
     users.settings.nats_enabled = social.settings.nats_enabled = False
     users.settings.social_service_url = users.settings.events_service_url = None
     social.settings.users_service_url = social.settings.events_service_url = None
-    users.settings.media_service_url = social.settings.media_service_url = None
+
     events.settings.users_base_url = events.settings.social_service_url = None
-    events.settings.media_service_url = None
+    lookup = local_asset_lookup(factories["media"])
+    for consumer in (users.settings, social.settings, events.settings):
+        consumer.use_local_media(lookup)
+    media.settings.s3_bucket = "lite-local"
     media.settings.upload_temp_dir = str(media_root)
     if users.settings.smtp_enabled and users.settings.smtp_host not in {"127.0.0.1", "localhost"}:
         raise ValueError("Lite SMTP requires an isolated local sender")
@@ -110,9 +96,22 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="Perlimen Lite", lifespan=lifespan)
     app.add_exception_handler(SessionAuthenticationError, session_authentication_error)
-    app.dependency_overrides[media.get_object_storage] = unavailable_blob_storage
     social_owner = LiteSocialOwner(factories["users"], factories["events"])
     app.dependency_overrides[get_social_owner] = lambda: social_owner
+
+    def local_upload_storage() -> LocalMediaStorage:
+        if not storage.ready():
+            raise HTTPException(status_code=503, detail="private media directory is not ready")
+        return storage
+
+    # Erasure resolves the adapter without I/O so it can commit the fence first.
+    app.dependency_overrides[media.get_object_storage] = lambda: storage
+    app.dependency_overrides[media.get_upload_storage] = local_upload_storage
+    app.include_router(
+        media_access_router(factories, storage),
+        prefix="/media",
+        dependencies=[Depends(require_internal_token)],
+    )
     for domain, (router, session) in MODULES.items():
         app.include_router(
             router, prefix=f"/{domain}", dependencies=[Depends(require_internal_token)]
@@ -125,7 +124,7 @@ def create_app() -> FastAPI:
 
     @app.get("/readyz")
     def readyz() -> dict[str, str]:
-        if not private_media_ready(media_root):
+        if not storage.ready():
             raise HTTPException(status_code=503, detail="private media directory is not ready")
         for domain, engine in engines.items():
             try:

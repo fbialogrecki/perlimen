@@ -1,15 +1,18 @@
 import logging
-from dataclasses import dataclass
 
 import httpx
 
+from perlimen_common.media_client import (
+    MediaAssetRef as MediaAssetRef,
+)
+from perlimen_common.media_client import (
+    MediaAssetValidationError as MediaAssetValidationError,
+)
+from perlimen_common.media_client import get_media_asset as get_media_asset
 from users.settings import Settings
 
 logger = logging.getLogger(__name__)
 
-
-class MediaAssetValidationError(Exception):
-    pass
 
 
 def erase_media_assets(settings: Settings, user_id: str) -> None:
@@ -27,37 +30,6 @@ def erase_media_assets(settings: Settings, user_id: str) -> None:
         logger.exception("media account erasure request failed")
         raise
 
-
-@dataclass(frozen=True)
-class MediaAssetRef:
-    id: str
-    owner_user_id: str
-    context: str
-    status: str
-
-
-def get_media_asset(settings: Settings, asset_id: str) -> MediaAssetRef:
-    if not settings.media_service_url or not settings.perlimen_internal_token:
-        raise MediaAssetValidationError("media validation is not configured")
-    try:
-        response = httpx.get(
-            f"{settings.media_service_url.rstrip('/')}/internal/v1/assets/{asset_id}",
-            headers={"X-Threshold-Internal-Token": settings.perlimen_internal_token},
-            timeout=settings.media_request_timeout_seconds,
-        )
-    except httpx.HTTPError as exc:
-        raise MediaAssetValidationError("media validation failed") from exc
-    if response.status_code == 404:
-        raise MediaAssetValidationError("media asset not found")
-    if response.status_code >= 400:
-        raise MediaAssetValidationError("media validation failed")
-    body = response.json()
-    return MediaAssetRef(
-        id=body["id"],
-        owner_user_id=body["owner_user_id"],
-        context=body["context"],
-        status=body["status"],
-    )
 
 
 def validate_avatar_asset(
