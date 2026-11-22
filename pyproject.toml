@@ -62,7 +62,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.pytest.ini_options]
 addopts = "-q --import-mode=importlib"
-testpaths = ["services", "libs/py/tests", "ops/tests", "ci/woodpecker/tests"]
+testpaths = ["services", "libs/py/tests", "perlimen_lite/tests", "ops/tests", "ci/woodpecker/tests"]
 
 [tool.mypy]
 python_version = "3.13"
