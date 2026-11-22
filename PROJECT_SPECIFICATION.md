@@ -288,8 +288,8 @@ name (namespace, env var prefix, headers, cookies, buckets). See `docs/rebrandin
   locale cookie is `threshold_locale`.
 - The UI is dark-only; motion respects `prefers-reduced-motion`. Only the landing hero uses
   three.js, lazy-loaded with a static fallback.
-- Observability: k3s services export OTLP to their collector; Loki, Tempo, Mimir and Grafana
-  stay in-cluster. Lite starts without telemetry or exporters and emits sanitized request IDs,
+- Observability: k3s services export OTLP to their collector; Loki, Tempo, Mimir and Grafana stay
+  in-cluster. Lite disables telemetry, exporters and raw Next dev logs/traces. It emits request IDs,
   route templates and durations for the API plus BFF timing for `/app`, QR check-in and upload.
 - No fake data: product surfaces read live service data or show empty states.
 

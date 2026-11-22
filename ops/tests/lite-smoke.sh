@@ -8,6 +8,7 @@ unit=$instance.service
 state=${XDG_STATE_HOME:-$HOME/.local/state}/$instance
 runtime=${XDG_RUNTIME_DIR:?}/$instance
 [[ ! -e $state && $(systemctl --user show -p LoadState --value "$unit") == not-found ]]
+[[ ! -e apps/web/.next && ! -e apps/web/.next-profiles ]] || { printf 'Use a fresh Next output directory.\n' >&2; exit 2; }
 trap 'go-task lite:stop' EXIT
 
 export PERLIMEN_LITE_WEB_PORT=${PERLIMEN_LITE_WEB_PORT:-58300}
@@ -23,6 +24,44 @@ ready() {
         [[ $(ss -H -ltn "sport = :$port" | awk '{print $4}') == "127.0.0.1:$port" ]]
     done
     [[ $("${pg[@]}" ps --format '{{.Names}}') == postgres ]]
+}
+
+reset_marker=lite-smoke-reset-$(openssl rand -hex 12)
+verify_marker=lite-smoke-verify-$(openssl rand -hex 12)
+auth_link() {
+    local status
+    status=$(curl -q --noproxy '*' --silent --show-error --max-time 30 \
+        -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PERLIMEN_LITE_WEB_PORT/$1?token=$2")
+    [[ $status == 200 ]] || { printf 'BFF %s: expected HTTP 200, got %s\n' "$1" "$status" >&2; return 1; }
+}
+
+private_diagnostics() {
+    python3 -I - "$unit" "$runtime" "$reset_marker" "$verify_marker" "$1" <<'PY'
+import subprocess
+import sys
+from pathlib import Path
+
+unit, runtime, *markers, phase = sys.argv[1:]
+bff = Path(runtime) / "bff.jsonl"
+journal = subprocess.check_output(["journalctl", "--user", "-u", unit, "--no-pager", "-o", "cat"])
+if b'/readyz' not in journal or (phase == "running" and not bff.is_file()):
+    sys.exit("Expected Lite journal and runtime diagnostics")
+needles = tuple(marker.encode() for marker in markers)
+
+def check(name, payload):
+    if any(marker in payload for marker in needles):
+        sys.exit(f"Synthetic auth link value found {phase} in {name}")
+
+check("unit journal", journal)
+if bff.is_file():
+    check("bff.jsonl", bff.read_bytes())
+for dist in (Path("apps/web/.next"), Path("apps/web/.next-profiles")):
+    for path in dist.rglob("*"):
+        if path.is_file() and (path.name.startswith("trace") or ".log" in path.name):
+            check(path, path.read_bytes())
+            if path.name in {"trace", "next-development.log"}:
+                sys.exit(f"Unexpected Next diagnostic sink {phase}: {path}")
+PY
 }
 
 auth() {
@@ -80,6 +119,9 @@ stack_group() { systemctl --user show "$unit" --value -p ControlGroup; }
 
 go-task lite:start
 ready
+auth_link reset-password "$reset_marker"
+auth_link verify-email "$verify_marker"
+private_diagnostics running
 pid=$(main_pid)
 group=$(stack_group)
 [[ $pid != 0 && -n $group && -r /sys/fs/cgroup$group/cgroup.procs ]]
@@ -90,10 +132,11 @@ logged_in=$(auth login)
 go-task lite:start
 [[ $(main_pid) == "$pid" ]]
 stopped "$group"
+private_diagnostics stopped
 
 go-task lite:start
 ready
 logged_in=$(auth login)
 [[ $logged_in == "$registered" ]]
 stopped "$(stack_group)"
-printf 'Lite lifecycle smoke passed (loopback, readiness, BFF register/login, account persistence, and clean stop).\n'
+printf 'Lite lifecycle smoke passed (loopback, readiness, private diagnostics, BFF register/login, account persistence, and clean stop).\n'

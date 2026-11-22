@@ -143,6 +143,9 @@ await API "$api_pid" 45 "${http[@]}" "$api_url/readyz"
     export PERLIMEN_LITE_BFF_LOG="$RUNTIME_DIRECTORY/bff.jsonl"
     : > "$PERLIMEN_LITE_BFF_LOG"
     export NODE_ENV=development NEXT_TELEMETRY_DISABLED=1 AUTH_COOKIE_SECURE=true WEB_TRUSTED_LAN_HTTP=false
+    # Pinned Next dev records raw URLs in spans independently of telemetry. Set
+    # its millisecond threshold above the maximum representable span (2^53−1 µs).
+    export NEXT_TRACE_SPAN_THRESHOLD_MS=9007199254741
     # Next development output can include URLs, fetch details and raw errors.
     exec bun ./node_modules/next/dist/bin/next dev --hostname "$host" --port "$web_port" >/dev/null 2>&1
 ) &
