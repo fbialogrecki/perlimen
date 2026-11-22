@@ -213,7 +213,14 @@ def _profile_response(user: ApplicationUser) -> CurrentProfileResponse:
     return CurrentProfileResponse.model_validate(_profile_payload(user))
 
 
-def _set_auth_cookies(response: Response, *, session_token: str, refresh_token: str) -> None:
+def _refresh_cookie_path(request: Request) -> str:
+    # Use the registered route so a router prefix applies to setting and clearing alike.
+    return str(request.app.url_path_for("refresh")).rsplit("/", 1)[0]
+
+
+def _set_auth_cookies(
+    request: Request, response: Response, *, session_token: str, refresh_token: str
+) -> None:
     response.set_cookie(
         SESSION_COOKIE,
         session_token,
@@ -230,19 +237,19 @@ def _set_auth_cookies(response: Response, *, session_token: str, refresh_token: 
         secure=settings.auth_cookie_secure,
         samesite="lax",
         max_age=settings.auth_refresh_ttl_days * 24 * 60 * 60,
-        path="/v1/auth",
+        path=_refresh_cookie_path(request),
     )
 
 
-def _clear_auth_cookies(response: Response) -> None:
+def _clear_auth_cookies(request: Request, response: Response) -> None:
     response.delete_cookie(SESSION_COOKIE, path="/")
-    response.delete_cookie(REFRESH_COOKIE, path="/v1/auth")
+    response.delete_cookie(REFRESH_COOKIE, path=_refresh_cookie_path(request))
 
 
-def session_authentication_error(_: Request, exc: Exception) -> JSONResponse:
+def session_authentication_error(request: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, SessionAuthenticationError)
     response = JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
-    _clear_auth_cookies(response)
+    _clear_auth_cookies(request, response)
     return response
 
 
@@ -1051,7 +1058,7 @@ def register(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except DuplicateIdentityError as exc:
         raise HTTPException(status_code=409, detail="email or username already registered") from exc
-    _set_auth_cookies(response, session_token=session_token, refresh_token=refresh_token)
+    _set_auth_cookies(request, response, session_token=session_token, refresh_token=refresh_token)
     return RegisterResponse.model_validate(
         {
             **_profile_payload(user),
@@ -1078,7 +1085,7 @@ def login(
         )
     except AuthError as exc:
         raise HTTPException(status_code=401, detail="invalid credentials") from exc
-    _set_auth_cookies(response, session_token=session_token, refresh_token=refresh_token)
+    _set_auth_cookies(request, response, session_token=session_token, refresh_token=refresh_token)
     return TokenResponse.model_validate(_profile_payload(user))
 
 
@@ -1096,7 +1103,7 @@ def refresh(request: Request, response: Response, session: DbSession) -> TokenRe
         )
     except AuthError as exc:
         raise SessionAuthenticationError("invalid refresh token") from exc
-    _set_auth_cookies(response, session_token=session_token, refresh_token=refresh_token)
+    _set_auth_cookies(request, response, session_token=session_token, refresh_token=refresh_token)
     return TokenResponse.model_validate(_profile_payload(user))
 
 
@@ -1108,7 +1115,7 @@ def logout(request: Request, response: Response, session: DbSession) -> Response
         session_token=request.cookies.get(SESSION_COOKIE),
         refresh_token=request.cookies.get(REFRESH_COOKIE),
     )
-    _clear_auth_cookies(response)
+    _clear_auth_cookies(request, response)
     response.status_code = status.HTTP_204_NO_CONTENT
     return response
 
@@ -1260,11 +1267,12 @@ def create_or_update_artist_profile(
 @router.delete("/v1/me", status_code=status.HTTP_202_ACCEPTED)
 def delete_me_account(
     user: ActiveUser,
+    request: Request,
     response: Response,
     session: DbSession,
 ) -> Response:
     enqueue_account_erasure(session, user)
-    _clear_auth_cookies(response)
+    _clear_auth_cookies(request, response)
     response.status_code = status.HTTP_202_ACCEPTED
     return response
 

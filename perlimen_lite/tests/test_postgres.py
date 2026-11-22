@@ -148,13 +148,39 @@ def test_migrate_and_serve_fresh_postgres(tmp_path: Path, monkeypatch: pytest.Mo
         assert asset.status_code == 404 and asset.json()["detail"] == "asset not found"
         auth = client.get("/users/v1/auth/me", headers={"X-Threshold-User-Id": "forged"})
         assert auth.status_code == 401 and len(auth.headers.get_list("set-cookie")) == 2
+        auth_path = "/users/v1/auth"
+        password = "Test-Only-x9L48Vr"
         registered = client.post(
-            "/users/v1/auth/register",
+            f"{auth_path}/register",
             json={
                 "email": "lite@example.test",
                 "username": "litestage",
-                "password": "Test-Only-x9L48Vr",
+                "password": password,
             },
         )
         assert registered.status_code == 201
-        assert client.get("/users/v1/auth/me").json()["user"]["username"] == "litestage"
+        assert client.cookies.get("threshold_refresh", path=auth_path)
+        assert client.get(f"{auth_path}/me").json()["user"]["username"] == "litestage"
+
+        client.cookies.clear()
+        credentials = {"email_or_username": "litestage", "password": password}
+        login = client.post(f"{auth_path}/login", json=credentials)
+        assert login.status_code == 200
+        first_refresh = client.cookies.get("threshold_refresh")
+        assert first_refresh
+        assert client.post(f"{auth_path}/refresh").status_code == 200
+        rotated = client.cookies.get("threshold_refresh", path=auth_path)
+        assert rotated and rotated != first_refresh
+
+        outside_auth = client.get("/social/v1/groups")
+        assert "threshold_refresh=" not in outside_auth.request.headers.get("cookie", "")
+        assert client.post(f"{auth_path}/logout").status_code == 204
+        assert not client.cookies
+        assert client.get(f"{auth_path}/me").status_code == 401
+        assert client.post(f"{auth_path}/refresh").status_code == 401
+
+        assert client.post(f"{auth_path}/login", json=credentials).status_code == 200
+        client.cookies.delete("threshold_session", path="/")
+        assert client.cookies.get("threshold_refresh", path=auth_path)
+        assert client.get(f"{auth_path}/me").status_code == 401
+        assert not client.cookies

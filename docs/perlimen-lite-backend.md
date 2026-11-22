@@ -42,6 +42,8 @@ private media directory. Domain HTTP routes retain their payloads and authorizat
 under `/users`, `/social`, `/events`, and `/media`. The Lite listener expects the
 internal token even on `/users`; this supplements, not replaces, product sessions
 and each router's own authorization. Do not expose the listener to browsers.
+Lite sets and clears `threshold_refresh` at `/users/v1/auth`; standalone users
+uses `/v1/auth`. The BFF must keep its browser-facing refresh cookie at `/api/auth`.
 
 This backend slice does not switch the BFF or forward requests to legacy services.
 Cross-domain operations that require transport replacement are not integrated;

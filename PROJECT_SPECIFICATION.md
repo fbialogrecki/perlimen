@@ -133,10 +133,10 @@ name (namespace, env var prefix, headers, cookies, buckets). See `docs/rebrandin
   reset request/confirm) and `/api/me`. Authentik is not used for product login.
 - Passwords: Argon2id (time cost 3, memory 64 MiB, parallelism 2, 32-byte hash) over an
   HMAC-SHA256 pre-hash with a versioned server-side pepper (`services/users/src/users/auth/hashing.py`).
-- Sessions: opaque random tokens stored only as HMAC hashes in `user_sessions`. The session
-  cookie `threshold_session` (path `/`) lives 15 minutes; the refresh cookie
-  `threshold_refresh` (path `/v1/auth`) lives 30 days and rotates on refresh. Both are
-  HttpOnly, SameSite=Lax, and Secure when configured.
+- Sessions: opaque random tokens stored only as HMAC hashes in `user_sessions`.
+  `threshold_session` (path `/`) lives 15 minutes; `threshold_refresh` lives 30 days and
+  rotates on refresh. Its path is `/v1/auth` in standalone users, `/users/v1/auth` in Lite,
+  and `/api/auth` at the BFF. Both cookies are HttpOnly, SameSite=Lax, and Secure when configured.
 - Email verification tokens expire after 24 hours, password reset tokens after 30 minutes.
   Tokens are never returned to the browser. Email is sent over SMTP when enabled; plaintext
   SMTP is refused outside `local`/`test` environments. The cluster config targets Resend over
