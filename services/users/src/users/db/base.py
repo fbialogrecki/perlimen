@@ -1,6 +1,6 @@
-from collections.abc import Generator
+from collections.abc import Generator, Iterable
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -8,6 +8,15 @@ from sqlalchemy.pool import StaticPool
 
 class Base(DeclarativeBase):
     pass
+
+
+def lock_user_write_domains(session: Session, user_ids: Iterable[str]) -> None:
+    if session.get_bind().dialect.name == "postgresql":
+        for user_id in sorted(set(user_ids)):
+            session.execute(
+                text("select pg_advisory_xact_lock(hashtextextended(:user_id, 1431520594))"),
+                {"user_id": user_id},
+            )
 
 
 def build_engine(database_url: str) -> Engine:

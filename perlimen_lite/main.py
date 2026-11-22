@@ -6,15 +6,21 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from alembic.script import ScriptDirectory
+from events.api.routes import erase_account_data as erase_events_account
 from events.api.routes import router as events_router
+from events.api.schemas import AccountErasureRequest as EventsErasureRequest
 from events.owner import get_event_owner
 from fastapi import APIRouter, Depends, FastAPI, HTTPException
+from media.api.routes import erase_account_data as erase_media_account
 from media.api.routes import router as media_router
+from media.api.schemas import AccountErasureRequest as MediaErasureRequest
+from social.api.routes import anonymize_author
 from social.api.routes import router as social_router
+from social.api.schemas import AnonymizeAuthorRequest
 from social.owner import get_social_owner
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
-from users.account_erasure import account_erasure_worker
+from users.account_erasure import ErasureStages, account_erasure_worker
 from users.api.routes import (
     SessionAuthenticationError,
     require_internal_token,
@@ -68,6 +74,7 @@ def create_app() -> FastAPI:
     # added without delegating to localhost or changing the standalone apps.
     users.settings.nats_enabled = social.settings.nats_enabled = False
     users.settings.social_service_url = users.settings.events_service_url = None
+    users.settings.media_service_url = None
     social.settings.users_service_url = social.settings.events_service_url = None
 
     events.settings.users_base_url = events.settings.social_service_url = None
@@ -79,6 +86,25 @@ def create_app() -> FastAPI:
     if users.settings.smtp_enabled and users.settings.smtp_host not in {"127.0.0.1", "localhost"}:
         raise ValueError("Lite SMTP requires an isolated local sender")
 
+    social_owner = LiteSocialOwner(factories["users"], factories["events"])
+
+    def erase_social(user_id: str) -> None:
+        with factories["social"]() as session:
+            anonymize_author(AnonymizeAuthorRequest(user_id=user_id), session, social_owner)
+
+    def erase_events(user_id: str, artist_profile_ids: list[str]) -> None:
+        with factories["events"]() as session:
+            erase_events_account(
+                EventsErasureRequest(user_id=user_id, artist_profile_ids=artist_profile_ids),
+                session,
+            )
+
+    def erase_media(user_id: str) -> None:
+        with factories["media"]() as session:
+            erase_media_account(MediaErasureRequest(user_id=user_id), session, storage)
+
+    stages = ErasureStages(social=erase_social, events=erase_events, media=erase_media)
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         stop = asyncio.Event()
@@ -86,7 +112,9 @@ def create_app() -> FastAPI:
             async with asyncio.TaskGroup() as tasks:
                 if users.settings.account_erasure_worker_enabled:
                     tasks.create_task(
-                        account_erasure_worker(factories["users"], users.settings, stop)
+                        account_erasure_worker(
+                            factories["users"], users.settings, stop, stages=stages
+                        )
                     )
                 try:
                     yield
@@ -98,7 +126,6 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="Perlimen Lite", lifespan=lifespan)
     app.add_exception_handler(SessionAuthenticationError, session_authentication_error)
-    social_owner = LiteSocialOwner(factories["users"], factories["events"])
     app.dependency_overrides[get_social_owner] = lambda: social_owner
     event_owner = LiteEventOwners(factories["users"], factories["social"]).port()
     app.dependency_overrides[get_event_owner] = lambda: event_owner

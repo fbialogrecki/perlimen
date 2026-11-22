@@ -37,7 +37,7 @@ Keep this map correct: line ranges shift whenever content is added or removed.
 | --- | --- | --- |
 | **1** | **Specification governance** — changing anything in this file | 80-90 |
 | **2** | **Vision and scope** — you need product framing or the MVP boundary | 91-109 |
-| **3** | **Functional requirements** — changing product behavior | 110-288 |
+| **3** | **Functional requirements** — changing product behavior | 110-292 |
 | 3.1 | Access model and web routes | 112-128 |
 | 3.2 | Accounts and authentication | 129-149 |
 | 3.3 | Identity, profiles, Pages and follows | 150-167 |
@@ -49,31 +49,31 @@ Keep this map correct: line ranges shift whenever content is added or removed.
 | 3.9 | Notifications | 243-251 |
 | 3.10 | Search and mentions | 252-260 |
 | 3.11 | Safety: blocks, reports, moderation | 261-273 |
-| 3.12 | Account erasure | 274-288 |
-| **4** | **Non-functional requirements** — touching limits, i18n, observability, health | 289-306 |
-| **5** | **System context** — you need the repo layout or the ownership split | 307-345 |
-| 5.1 | Repository layout | 309-329 |
-| 5.2 | Service ownership | 330-345 |
-| **6** | **Architecture** — touching runtime, service transports, CI/CD or GitOps | 346-398 |
-| 6.1 | Runtime | 348-372 |
-| 6.2 | Service-to-service transports | 373-385 |
-| 6.3 | Build, publication and deployment | 386-398 |
-| **7** | **Security** — touching auth, trust boundaries, secrets or headers | 399-416 |
-| **8** | **Privacy and data retention** — touching personal data, deletion or backups | 417-430 |
-| **9** | **Data model** — changing tables or migrations | 431-467 |
-| 9.1 | users | 436-446 |
-| 9.2 | social | 447-452 |
-| 9.3 | events | 453-460 |
-| 9.4 | media | 461-467 |
-| **10** | **API contract** — adding or changing an endpoint | 468-547 |
-| 10.1 | Conventions | 470-475 |
-| 10.2 | users | 476-497 |
-| 10.3 | social | 498-511 |
-| 10.4 | events | 512-527 |
-| 10.5 | media and auth-gateway | 528-534 |
-| 10.6 | Web BFF | 535-547 |
-| **11** | **Test plan** — you need test locations, gates or CI jobs | 548-563 |
-| **12** | **References** — you need operational detail kept out of this file | 564-573 |
+| 3.12 | Account erasure | 274-292 |
+| **4** | **Non-functional requirements** — touching limits, i18n, observability, health | 293-310 |
+| **5** | **System context** — you need the repo layout or the ownership split | 311-349 |
+| 5.1 | Repository layout | 313-333 |
+| 5.2 | Service ownership | 334-349 |
+| **6** | **Architecture** — touching runtime, service transports, CI/CD or GitOps | 350-402 |
+| 6.1 | Runtime | 352-376 |
+| 6.2 | Service-to-service transports | 377-389 |
+| 6.3 | Build, publication and deployment | 390-402 |
+| **7** | **Security** — touching auth, trust boundaries, secrets or headers | 403-420 |
+| **8** | **Privacy and data retention** — touching personal data, deletion or backups | 421-434 |
+| **9** | **Data model** — changing tables or migrations | 435-471 |
+| 9.1 | users | 440-450 |
+| 9.2 | social | 451-456 |
+| 9.3 | events | 457-464 |
+| 9.4 | media | 465-471 |
+| **10** | **API contract** — adding or changing an endpoint | 472-551 |
+| 10.1 | Conventions | 474-479 |
+| 10.2 | users | 480-501 |
+| 10.3 | social | 502-515 |
+| 10.4 | events | 516-531 |
+| 10.5 | media and auth-gateway | 532-538 |
+| 10.6 | Web BFF | 539-551 |
+| **11** | **Test plan** — you need test locations, gates or CI jobs | 552-567 |
+| **12** | **References** — you need operational detail kept out of this file | 568-577 |
 
 ---
 
@@ -160,8 +160,8 @@ name (namespace, env var prefix, headers, cookies, buckets). See `docs/rebrandin
   `project`, `festival`), city, about text, links and avatar. Roles are `owner`, `admin`,
   `editor`, enforced in `users`: any role edits the Page and lists members, owners add,
   change and remove members.
-- Residencies: a Page owner or admin invites an artist; the artist accepts or rejects
-  (`/v1/me/residencies/{id}/accept|reject`).
+- Residencies: only a current Page owner or admin can invite an artist; the role is checked
+  under the account write lock. Artists accept or reject (`/v1/me/residencies/{id}/accept|reject`).
 - Follows target artist profiles, consumer profiles or Pages (`/v1/me/follows`). Event
   follows live in `events`.
 
@@ -275,14 +275,18 @@ name (namespace, env var prefix, headers, cookies, buckets). See `docs/rebrandin
 
 - `DELETE /v1/me` (202) sets the account to `erasure_pending`, deletes sessions and pending
   tokens, and enqueues an `account_erasure_jobs` row in one transaction.
+- The settings flow uses `DELETE /api/me`; 202 acknowledges the durable request, not completed
+  erasure. Lite calls each owning module in-process and resumes persisted jobs after restart,
+  including reclaiming an interrupted job after its lease expires. Media removes the local
+  original and derivatives before deleting their inventory.
 - A background worker in `users` runs stages in order: `social` (anonymize author),
   `events`, `media`, then local data. Failed stages retry with exponential backoff capped at
   one hour. `social`, `events` and `media` write erasure tombstones that fence later writes
   by that owner.
-- Local erasure deletes sessions, tokens, preferences, notifications, blocks, follows,
-  memberships, residencies and key envelopes; clears email, username and credentials; renames
-  the consumer profile to "Deleted User"; removes artist profile and onboarding data; and
-  detaches identifiers from reports and audit logs while keeping the security events.
+- Users serializes relationship writes on the affected accounts and rejects inactive accounts.
+  Erasure removes user follows, not unrelated Page follows with a matching handle. It deletes
+  sessions, tokens, preferences, notifications, blocks, memberships, residencies and key envelopes;
+  clears credentials, identity, artist and onboarding data; anonymizes the consumer profile and retained audits/reports.
 
 ---
 
@@ -374,7 +378,7 @@ See [Perlimen Lite backend](docs/perlimen-lite-backend.md) for the local configu
 
 | Transport | Flows |
 | --- | --- |
-| In-process owner API (Lite) | Social follows, blocks, mentions and notifications; Events Page roles, artist and user references, guest and update notifications, and city announcements; media asset validation. Each call uses the owner's runtime login |
+| In-process owner API (Lite) | Social follows, blocks, mentions and notifications; Events Page roles, artist and user references, guest and update notifications, and city announcements; media asset validation; account erasure. Each call uses the owner's runtime login |
 | NATS request/reply (standalone) | `users.current_profile.v1` (auth-gateway → users), `users.follow.list_following.v1` (social → users) |
 | NATS pub/sub (standalone) | `users.block.changed.v1` (users → social) |
 | HTTP `/internal/v1/*` with `X-Threshold-Internal-Token` | Standalone cross-service calls and integrations not moved in-process: Page roles and artist lookups (events → users), notifications and mention lookups, event announcements (events → social), account erasure (users → social/events/media), media asset validation |
@@ -421,7 +425,7 @@ the BFF also sends the internal token to the pinned loopback `/users` endpoint w
 - Public identity is the username; there are no public real-name fields for people.
 - Auth audit logs store keyed hashes of subject, IP and user agent, not raw values.
 - Account erasure (§3.12) deletes or anonymizes personal data across all four data services
-  while keeping public thread integrity (authors become "Deleted User").
+  while keeping public thread integrity (authors become unlinked "Deleted User" labels).
 - Backups: each CNPG cluster archives WAL and takes daily base backups through the Barman
   Cloud plugin with 14-day retention. Host-level backups are described in
   `docs/runbooks/backup-restore.md`.
@@ -534,7 +538,7 @@ appropriate.
 
 ### 10.6 Web BFF
 
-Route handlers in `apps/web/src/app/api/`: `auth/*`, `me` (`profile`, `artist`),
+Route handlers in `apps/web/src/app/api/`: `auth/*`, `me` (`DELETE` for erasure, `profile`, `artist`),
 `onboarding`, `follow`, `blocks`, `reports`, `notifications/*`, `pages/*`,
 `search/mentions`, `media/assets` (upload and `[...path]` proxy), `events/*` (event CRUD,
 updates, follow, boost, viewer context, guestlist, quotas, QR token, door staff, check-in) and

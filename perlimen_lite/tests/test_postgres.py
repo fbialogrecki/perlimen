@@ -25,6 +25,7 @@ from perlimen_lite.database import (
     required,
     role,
 )
+from perlimen_lite.tests.erasure_restart import check_erasure_restart
 from PIL import Image
 from sqlalchemy import Connection, Engine, event, select
 from sqlalchemy.exc import ProgrammingError
@@ -246,6 +247,8 @@ def test_migrate_and_serve_fresh_postgres(tmp_path: Path, monkeypatch: pytest.Mo
         assert not client.cookies
         check_social_policy(client)
         check_events(client)
+
+    check_erasure_restart(root)
 
 
 def check_events(client: TestClient) -> None:

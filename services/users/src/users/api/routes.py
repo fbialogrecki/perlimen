@@ -5,7 +5,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, aliased
 from users.account_erasure import enqueue_account_erasure
 from users.api.schemas import (
@@ -71,6 +71,7 @@ from users.auth.service import (
     request_password_reset,
     revoke_session,
 )
+from users.db.base import lock_user_write_domains
 from users.domain.follows import (
     PAGE_FOLLOW_TARGET_TYPES,
     canonical_follow_target_type,
@@ -148,29 +149,59 @@ class SessionAuthenticationError(HTTPException):
 
 
 def _lock_active_user_write_domain(session: Session, user_id: str) -> ApplicationUser:
-    if session.bind is not None and session.bind.dialect.name == "postgresql":
-        session.execute(
-            text("select pg_advisory_xact_lock(hashtextextended(:user_id, 1431520594))"),
-            {"user_id": user_id},
-        )
-    current = session.scalar(
-        select(ApplicationUser)
-        .where(ApplicationUser.id == user_id)
-        .execution_options(populate_existing=True)
-    )
+    lock_user_write_domains(session, [user_id])
+    return _require_active_actor(session, user_id)
+
+
+def _require_active_actor(session: Session, user_id: str) -> ApplicationUser:
+    current = session.get(ApplicationUser, user_id, populate_existing=True)
     if current is None or current.status != "active":
         raise SessionAuthenticationError("not authenticated")
     return current
 
 
-def get_current_user(request: Request, session: DbSession) -> ApplicationUser:
+def _authenticate_current_user(request: Request, session: DbSession) -> ApplicationUser:
     user = get_user_by_session_token(session, settings, request.cookies.get(SESSION_COOKIE))
     if user is None:
         raise SessionAuthenticationError("not authenticated")
-    return _lock_active_user_write_domain(session, user.id)
+    return user
+
+
+AuthenticatedUser = Annotated[ApplicationUser, Depends(_authenticate_current_user)]
+
+
+def get_current_user(request: Request, session: DbSession) -> ApplicationUser:
+    return _lock_active_user_write_domain(session, _authenticate_current_user(request, session).id)
 
 
 ActiveUser = Annotated[ApplicationUser, Depends(get_current_user)]
+
+
+def _fence_user_target(
+    session: Session, actor_id: str, target_id: str, *, detail: str
+) -> ApplicationUser:
+    # Authenticate without retaining the actor lock, then acquire both in sorted order.
+    lock_user_write_domains(session, [actor_id, target_id])
+    _require_active_actor(session, actor_id)
+    target = session.get(ApplicationUser, target_id, populate_existing=True)
+    if target is None or target.status != "active":
+        raise HTTPException(status_code=404, detail=detail)
+    return target
+
+
+def _fence_user_by_username(
+    session: Session, actor_id: str, username: str, *, detail: str = "user not found"
+) -> ApplicationUser:
+    normalized = normalize_username(username)
+    target_id = session.scalar(
+        select(ApplicationUser.id).where(ApplicationUser.username_normalized == normalized)
+    )
+    if target_id is None:
+        raise HTTPException(status_code=404, detail=detail)
+    target = _fence_user_target(session, actor_id, target_id, detail=detail)
+    if target.username_normalized != normalized:
+        raise HTTPException(status_code=404, detail=detail)
+    return target
 
 
 def require_internal_token(
@@ -298,14 +329,14 @@ def _require_page_owner(page: Page, user_id: str) -> None:
     raise HTTPException(status_code=403, detail="page owner role required")
 
 
-def _require_page_owner_or_admin(page: Page, user_id: str) -> None:
-    for membership in page.memberships:
-        if membership.user_id == user_id and membership.role in {
-            PageMembershipRole.owner,
-            PageMembershipRole.admin,
-        }:
-            return
-    raise HTTPException(status_code=403, detail="page owner/admin role required")
+def _require_page_owner_or_admin(session: Session, page_id: str, user_id: str) -> None:
+    role = session.scalar(
+        select(PageMembership.role).where(
+            PageMembership.page_id == page_id, PageMembership.user_id == user_id
+        )
+    )
+    if role not in {PageMembershipRole.owner, PageMembershipRole.admin}:
+        raise HTTPException(status_code=403, detail="page owner/admin role required")
 
 
 def _artist_ref(user: ApplicationUser) -> PublicArtistRefResponse:
@@ -650,18 +681,12 @@ def _publish_block_projection(
 
 
 def _resolve_report_target(
-    session: Session, *, target_type: str, target_handle: str
+    session: Session, *, actor_id: str, target_type: str, target_handle: str
 ) -> tuple[str, str]:
     if target_type == "profile":
-        user = session.scalar(
-            select(ApplicationUser).where(
-                ApplicationUser.username_normalized == normalize_username(target_handle),
-                ApplicationUser.status == "active",
-            )
-        )
-        if user is None:
-            raise HTTPException(status_code=404, detail="profile not found")
+        user = _fence_user_by_username(session, actor_id, target_handle, detail="profile not found")
         return user.id, user.username or target_handle
+    _lock_active_user_write_domain(session, actor_id)
     if target_type == "page":
         page = session.scalar(select(Page).where(Page.slug == target_handle))
         if page is None:
@@ -695,8 +720,9 @@ def put_onboarding_preferences(
     _: Annotated[None, Depends(require_internal_token)],
     session: DbSession,
 ) -> CurrentProfileResponse:
-    user = session.get(ApplicationUser, user_id)
-    if user is None:
+    lock_user_write_domains(session, [user_id])
+    user = session.get(ApplicationUser, user_id, populate_existing=True)
+    if user is None or user.status != "active":
         raise HTTPException(status_code=404, detail="user not found")
     update_onboarding_preferences(
         session,
@@ -1006,6 +1032,10 @@ def create_internal_notification(
 def receive_notification(
     session: Session, payload: NotificationCreateRequest, response: Response
 ) -> NotificationResponse:
+    ids = [payload.recipient_user_id]
+    if payload.actor_user_id:
+        ids.append(payload.actor_user_id)
+    lock_user_write_domains(session, ids)
     recipient = session.get(ApplicationUser, payload.recipient_user_id)
     if recipient is None or recipient.status != "active":
         raise HTTPException(status_code=404, detail="recipient not found")
@@ -1307,36 +1337,23 @@ def delete_me_account(
 @router.post("/v1/me/follows", response_model=SimpleStatusResponse)
 def follow_target(
     payload: FollowRequest,
-    user: ActiveUser,
+    user: AuthenticatedUser,
     session: DbSession,
 ) -> SimpleStatusResponse:
     target_type = canonical_follow_target_type(payload.target_type)
     target_handle = payload.target_handle
     target_id: str | None = None
 
-    if target_type == "consumer":
-        norm_handle = normalize_username(target_handle)
-        target_user = session.scalar(
-            select(ApplicationUser).where(ApplicationUser.username_normalized == norm_handle)
+    if target_type in {"consumer", "artist"}:
+        target_user = _fence_user_by_username(
+            session, user.id, target_handle, detail=f"target {target_type} not found"
         )
-        if target_user is None or target_user.status != "active":
-            raise HTTPException(status_code=404, detail="target consumer not found")
-        target_id = target_user.id
-        target_handle = target_user.username or target_handle
-    elif target_type == "artist":
-        norm_handle = normalize_username(target_handle)
-        target_user = session.scalar(
-            select(ApplicationUser).where(ApplicationUser.username_normalized == norm_handle)
-        )
-        if (
-            target_user is None
-            or target_user.status != "active"
-            or target_user.artist_profile is None
-        ):
+        if target_type == "artist" and target_user.artist_profile is None:
             raise HTTPException(status_code=404, detail="target artist not found")
         target_id = target_user.id
         target_handle = target_user.username or target_handle
     elif target_type == "page":
+        _lock_active_user_write_domain(session, user.id)
         page = session.scalar(select(Page).where(Page.slug == target_handle))
         if page is None:
             raise HTTPException(status_code=404, detail=f"target {target_type} not found")
@@ -1484,17 +1501,10 @@ def get_followed_targets(
 )
 def block_user(
     payload: BlockCreateRequest,
-    user: ActiveUser,
+    user: AuthenticatedUser,
     session: DbSession,
 ) -> SimpleStatusResponse:
-    target = session.scalar(
-        select(ApplicationUser).where(
-            ApplicationUser.username_normalized == normalize_username(payload.username),
-            ApplicationUser.status == "active",
-        )
-    )
-    if target is None:
-        raise HTTPException(status_code=404, detail="user not found")
+    target = _fence_user_by_username(session, user.id, payload.username)
     if target.id == user.id:
         raise HTTPException(status_code=400, detail="cannot block yourself")
     if _has_blocked(session, blocker_user_id=user.id, blocked_user_id=target.id):
@@ -1516,15 +1526,8 @@ def block_user(
 
 
 @router.delete("/v1/me/blocks/{username}", status_code=status.HTTP_204_NO_CONTENT)
-def unblock_user(username: str, user: ActiveUser, session: DbSession) -> Response:
-    target = session.scalar(
-        select(ApplicationUser).where(
-            ApplicationUser.username_normalized == normalize_username(username),
-            ApplicationUser.status == "active",
-        )
-    )
-    if target is None:
-        raise HTTPException(status_code=404, detail="user not found")
+def unblock_user(username: str, user: AuthenticatedUser, session: DbSession) -> Response:
+    target = _fence_user_by_username(session, user.id, username)
     block = session.scalar(
         select(UserBlock).where(
             UserBlock.blocker_user_id == user.id,
@@ -1550,11 +1553,14 @@ def unblock_user(username: str, user: ActiveUser, session: DbSession) -> Respons
 @router.post("/v1/reports", response_model=ReportResponse, status_code=status.HTTP_201_CREATED)
 def create_report(
     payload: ReportCreateRequest,
-    user: ActiveUser,
+    user: AuthenticatedUser,
     session: DbSession,
 ) -> ReportResponse:
     target_id, target_handle = _resolve_report_target(
-        session, target_type=payload.target_type, target_handle=payload.target_handle
+        session,
+        actor_id=user.id,
+        target_type=payload.target_type,
+        target_handle=payload.target_handle,
     )
     report = ContentReport(
         reporter_user_id=user.id,
@@ -1878,28 +1884,24 @@ def list_managed_pages(user: ActiveUser, session: DbSession) -> list[PageManagem
 def invite_page_residency(
     slug: str,
     username: str,
-    user: ActiveUser,
+    user: AuthenticatedUser,
     session: DbSession,
 ) -> ResidencyResponse:
     page = session.scalar(select(Page).where(Page.slug == slug))
     if page is None:
         raise HTTPException(status_code=404, detail="page not found")
-    _require_page_owner_or_admin(page, user.id)
-    artist = session.scalar(
-        select(ApplicationUser).where(
-            ApplicationUser.username_normalized == normalize_username(username),
-            ApplicationUser.status == "active",
-        )
-    )
-    if artist is None or artist.artist_profile is None:
+    _require_page_owner_or_admin(session, page.id, user.id)
+    artist = _fence_user_by_username(session, user.id, username, detail="artist not found")
+    # Membership changes take the same actor lock; only the role under that lock authorizes.
+    _require_page_owner_or_admin(session, page.id, user.id)
+    if artist.artist_profile is None:
         raise HTTPException(status_code=404, detail="artist not found")
     if artist.id == user.id:
         raise HTTPException(status_code=400, detail="cannot invite yourself")
     residency = session.scalar(
-        select(PageResidency).where(
-            PageResidency.page_id == page.id,
-            PageResidency.artist_user_id == artist.id,
-        )
+        select(PageResidency)
+        .where(PageResidency.page_id == page.id, PageResidency.artist_user_id == artist.id)
+        .with_for_update()
     )
     if residency is None:
         residency = PageResidency(
@@ -1943,15 +1945,30 @@ def invite_page_residency(
     return _residency_response(residency)
 
 
+def _fenced_residency(session: Session, residency_id: str, artist_id: str) -> PageResidency:
+    inviter_id = session.scalar(
+        select(PageResidency.invited_by_user_id).where(
+            PageResidency.id == residency_id, PageResidency.artist_user_id == artist_id
+        )
+    )
+    if inviter_id is None:
+        raise HTTPException(status_code=404, detail="residency not found")
+    _fence_user_target(session, artist_id, inviter_id, detail="residency not found")
+    residency = session.get(PageResidency, residency_id, populate_existing=True)
+    if residency is None or residency.artist_user_id != artist_id:
+        raise HTTPException(status_code=404, detail="residency not found")
+    if residency.invited_by_user_id != inviter_id:
+        raise HTTPException(status_code=409, detail="residency invitation changed")
+    return residency
+
+
 @router.post("/v1/me/residencies/{residency_id}/accept", response_model=ResidencyResponse)
 def accept_residency(
     residency_id: str,
-    user: ActiveUser,
+    user: AuthenticatedUser,
     session: DbSession,
 ) -> ResidencyResponse:
-    residency = session.get(PageResidency, residency_id)
-    if residency is None or residency.artist_user_id != user.id:
-        raise HTTPException(status_code=404, detail="residency not found")
+    residency = _fenced_residency(session, residency_id, user.id)
     residency.status = ResidencyStatus.accepted.value
     residency.responded_at = utc_now()
     session.add(residency)
@@ -2006,12 +2023,10 @@ def accept_residency(
 @router.post("/v1/me/residencies/{residency_id}/reject", response_model=ResidencyResponse)
 def reject_residency(
     residency_id: str,
-    user: ActiveUser,
+    user: AuthenticatedUser,
     session: DbSession,
 ) -> ResidencyResponse:
-    residency = session.get(PageResidency, residency_id)
-    if residency is None or residency.artist_user_id != user.id:
-        raise HTTPException(status_code=404, detail="residency not found")
+    residency = _fenced_residency(session, residency_id, user.id)
     residency.status = ResidencyStatus.rejected.value
     residency.responded_at = utc_now()
     session.add(residency)
@@ -2095,20 +2110,14 @@ def upsert_page_member(
     slug: str,
     username: str,
     payload: PageMembershipUpdateRequest,
-    user: ActiveUser,
+    user: AuthenticatedUser,
     session: DbSession,
 ) -> PageMembershipResponse:
     page = session.scalar(select(Page).where(Page.slug == slug))
     if page is None:
         raise HTTPException(status_code=404, detail="page not found")
     _require_page_owner(page, user.id)
-    target = session.scalar(
-        select(ApplicationUser).where(
-            ApplicationUser.username_normalized == normalize_username(username)
-        )
-    )
-    if target is None or target.status != "active":
-        raise HTTPException(status_code=404, detail="user not found")
+    target = _fence_user_by_username(session, user.id, username)
     membership = session.scalar(
         select(PageMembership).where(
             PageMembership.page_id == page.id,
@@ -2147,7 +2156,7 @@ def upsert_page_member(
 def delete_page_member(
     slug: str,
     username: str,
-    user: ActiveUser,
+    user: AuthenticatedUser,
     session: DbSession,
     response: Response,
 ) -> Response:
@@ -2155,13 +2164,7 @@ def delete_page_member(
     if page is None:
         raise HTTPException(status_code=404, detail="page not found")
     _require_page_owner(page, user.id)
-    target = session.scalar(
-        select(ApplicationUser).where(
-            ApplicationUser.username_normalized == normalize_username(username)
-        )
-    )
-    if target is None:
-        raise HTTPException(status_code=404, detail="user not found")
+    target = _fence_user_by_username(session, user.id, username)
     membership = session.scalar(
         select(PageMembership).where(
             PageMembership.page_id == page.id,

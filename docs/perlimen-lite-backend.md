@@ -61,9 +61,18 @@ duplicate announcements. Delivery is best effort when Social or the official gro
 Guestlist and QR operations keep Events' authorization and transaction rules in both profiles.
 
 Other cross-domain integrations can still be unavailable: legacy outbound URLs/NATS are
-disabled in this process. The existing users erasure worker is registered with the users
-session factory, but end-to-end erasure is not enabled by this alone.
-The isolated smoke test asserts real PostgreSQL behavior, not whole-product readiness.
+disabled in this process.
+
+## Account erasure
+
+Settings submits `DELETE /api/me` through the BFF. A `202` means Users durably queued the
+request and invalidated all access and refresh sessions, not that every deletion has finished.
+The Users worker calls Social, Events and Media in order, using each owner's runtime session
+and the same erasure operations as standalone. It saves progress in PostgreSQL and resumes
+due jobs after restart; a job interrupted while leased is eligible once the lease expires.
+Owner writes are fenced by the persisted tombstones; Social retains the discussion and
+replies with anonymous attribution, not a link to a profile. No extra worker or HTTP hop is
+needed. The flow covers the active database and media directory, not earlier copies.
 
 ## Media
 
@@ -96,5 +105,8 @@ checks own-schema access and sibling/DDL denials, then exercises the composed ap
 compares SQL query counts for one versus multiple Feed posts and checks that the canonical
 block takes effect immediately with no Social projection table.
 It also verifies announcement replay and races two authorized scans on separate PostgreSQL
-connections, checking the committed admission and audit row. It creates synthetic accounts;
-destroy only that disposable test instance afterwards.
+connections, checking the committed admission and audit row. The account erasure scenario
+forces a Media failure, kills the loopback API while it holds a retry lease, then restarts it
+with the same database and media root. It checks revoked sessions, write fences, physical
+deletion, and anonymous thread continuity with an unaffected control account. It creates
+synthetic accounts; destroy only that disposable test instance afterwards.

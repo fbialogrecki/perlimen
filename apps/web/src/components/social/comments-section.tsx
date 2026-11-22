@@ -187,22 +187,23 @@ function CommentItem({
   }
 
   const name = profileName(comment.author)
+  const href = profileHref(comment.author)
+  const avatar = <Avatar name={name} size="sm" />
 
   return (
     <div className="flex gap-2.5">
-      <Link href={profileHref(comment.author)}>
-        <Avatar name={name} size="sm" />
-      </Link>
+      {href ? <Link href={href}>{avatar}</Link> : avatar}
       <div className="min-w-0 flex-1">
         {/* Row height matches the small avatar, same rule as the post row. */}
         <div className="flex min-h-8 items-center gap-3">
           <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2">
-            <Link
-              href={profileHref(comment.author)}
-              className="truncate text-[13.5px] font-semibold text-raw-white hover:text-acid"
-            >
-              {name}
-            </Link>
+            {href ? (
+              <Link href={href} className="truncate text-[13.5px] font-semibold text-raw-white hover:text-acid">
+                {name}
+              </Link>
+            ) : (
+              <span className="truncate text-[13.5px] font-semibold text-raw-white">{name}</span>
+            )}
             <span className="text-xs text-muted">
               {formatRelative(comment.createdAtIso, locale)}
               {comment.editedAtIso ? ` · ${t("edited")}` : ""}
