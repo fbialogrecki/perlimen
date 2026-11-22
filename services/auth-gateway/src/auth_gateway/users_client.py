@@ -51,7 +51,7 @@ class UsersProfileClient:
         if not self.internal_token:
             raise UsersProfileClientError("users profile HTTP transport is not configured")
         try:
-            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+            async with httpx.AsyncClient(timeout=self.timeout_seconds, trust_env=False) as client:
                 response = await client.post(
                     f"{self.base_url}/internal/v1/current-profile",
                     headers={"X-Threshold-Internal-Token": self.internal_token},
@@ -61,7 +61,10 @@ class UsersProfileClient:
         except httpx.HTTPError:
             raise UsersProfileClientError("users profile HTTP request failed") from None
 
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError:
+            raise UsersProfileClientError("users profile response is invalid") from None
         if not isinstance(data, dict):
             raise UsersProfileClientError("users profile response is invalid")
         return data

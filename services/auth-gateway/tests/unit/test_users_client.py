@@ -30,8 +30,9 @@ async def test_http_profile_request_sends_internal_token(monkeypatch) -> None:
             return {"user": {"id": "user-1"}}
 
     class FakeAsyncClient:
-        def __init__(self, *, timeout: float) -> None:
+        def __init__(self, *, timeout: float, trust_env: bool) -> None:
             assert timeout == 1
+            assert not trust_env
 
         async def __aenter__(self):
             return self

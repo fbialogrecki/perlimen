@@ -56,8 +56,10 @@ Stop before changing this setting. Never forward captured mail or use real accou
 
 The default Lite start runs only Next.js, the Lite API and PostgreSQL: no Tempo,
 OTLP export, Grafana datasource, Mimir, Loki, Grafana, Alloy, Collector or
-Prometheus. The API writes JSON request IDs, route templates, status and timings
-to the unit journal. While the service is up, read the private BFF timing file
+Prometheus, and no NATS broker, Authentik or auth-gateway. The
+[optional gateway](../../services/auth-gateway/README.md#optional-lite-configuration) is separate
+from product login and Feed. The API writes JSON request IDs, route templates, status and
+timings to the unit journal. While the service is up, read the private BFF timing file
 at `$XDG_RUNTIME_DIR/<checkout-instance>/bff.jsonl` (removed on stop). It times
 `/app`, check-in and upload from Proxy ingress to App Router response close;
 matching API rows share the generated request ID. Lite discards raw Next.js

@@ -60,10 +60,31 @@ Social delivery for the same event ID. Social's unique event-to-post mapping pre
 duplicate announcements. Delivery is best effort when Social or the official group is unavailable.
 Guestlist and QR operations keep Events' authorization and transaction rules in both profiles.
 
-Other cross-domain integrations can still be unavailable: legacy outbound URLs/NATS are
-disabled in this process. The existing users erasure worker is registered with the users
+Other cross-domain integrations can still be unavailable: legacy outbound URLs are disabled
+in this process. The existing users erasure worker is registered with the users
 session factory, but end-to-end erasure is not enabled by this alone.
 The isolated smoke test asserts real PostgreSQL behavior, not whole-product readiness.
+
+## Broker and operator SSO
+
+Lite runs no NATS broker, enables no NATS clients, and does not load the standalone service
+lifespans. The standalone NATS clients and deployment stay in place:
+
+| NATS subject | Standalone client and handler | Lite path |
+| --- | --- | --- |
+| `users.current_profile.v1` | auth-gateway request → Users responder | Optional gateway calls `POST /users/internal/v1/current-profile` over HTTP with the internal token |
+| `users.follow.list_following.v1` | Social request → Users responder | Social reads the canonical follows through the Users owner API |
+| `users.block.changed.v1` | Users publisher → Social subscriber (standalone also repairs via HTTP) | Social reads canonical blocks through the Users owner API; no projection or repair loop |
+
+Events, Media and the web BFF use no NATS client. `nats-box` and NATS monitoring belong to the
+legacy cluster, not the Lite launcher.
+
+Product email/password sessions work without Authentik or the gateway. If run separately for
+operator SSO, the gateway accepts an Authentik bearer for the dedicated admin audience, not a
+product cookie. Restrict the Authentik application to operators; `aud` identifies the intended
+application, not a user's membership in a group. The gateway resolves an internal profile and
+does not mint a product cookie, grant product roles or replace the owning domain's authorization.
+See [auth-gateway configuration](../services/auth-gateway/README.md#optional-lite-configuration).
 
 ## Media
 

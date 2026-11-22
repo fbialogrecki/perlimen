@@ -10,6 +10,7 @@ from io import BytesIO
 from pathlib import Path
 from threading import Barrier
 
+import nats
 import psycopg
 import pytest
 from alembic.script import ScriptDirectory
@@ -103,14 +104,14 @@ def test_migrate_and_serve_fresh_postgres(tmp_path: Path, monkeypatch: pytest.Mo
         user=BOOTSTRAP,
         password=required("PERLIMEN_LITE_BOOTSTRAP_PASSWORD"),
         connect_timeout=5,
-    ) as conn:
-        assert not conn.execute(
+    ) as bootstrap_conn:
+        assert not bootstrap_conn.execute(
             "SELECT 1 FROM pg_namespace WHERE nspname NOT IN ('information_schema', 'public') "
             "AND left(nspname, 3) <> 'pg_'"
         ).fetchall(), "test requires fresh Postgres"
-        assert not conn.execute("SELECT 1 FROM pg_tables WHERE schemaname = 'public'").fetchall(), (
-            "test requires an empty public schema"
-        )
+        assert not bootstrap_conn.execute(
+            "SELECT 1 FROM pg_tables WHERE schemaname = 'public'"
+        ).fetchall(), "test requires an empty public schema"
 
     # Both CLI calls target the same database; the second must be a no-op for revisions.
     monkeypatch.setenv("PGHOSTADDR", "127.0.0.2")
@@ -178,6 +179,18 @@ def test_migrate_and_serve_fresh_postgres(tmp_path: Path, monkeypatch: pytest.Mo
     root.mkdir(mode=0o700)
     monkeypatch.setenv("PERLIMEN_LITE_MEDIA_ROOT", str(root))
     monkeypatch.setenv("THRESHOLD_INTERNAL_TOKEN", "lite-smoke-test-only")
+    from social.main_dependencies import settings as social_settings
+    from users.main_dependencies import settings as users_settings
+
+    monkeypatch.setattr(social_settings, "nats_enabled", True)
+    monkeypatch.setattr(users_settings, "nats_enabled", True)
+    broker_attempts: list[None] = []
+
+    async def unexpected_broker(*args: object, **kwargs: object) -> None:
+        broker_attempts.append(None)
+        raise AssertionError("Lite attempted a NATS connection")
+
+    monkeypatch.setattr(nats, "connect", unexpected_broker)
     from perlimen_lite.main import app
 
     with TestClient(app) as client:
@@ -246,6 +259,7 @@ def test_migrate_and_serve_fresh_postgres(tmp_path: Path, monkeypatch: pytest.Mo
         assert not client.cookies
         check_social_policy(client)
         check_events(client)
+    assert not broker_attempts
 
 
 def check_events(client: TestClient) -> None:
