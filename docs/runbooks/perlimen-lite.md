@@ -151,12 +151,15 @@ unchanged.
 - Reserve **13300 (Web), 13800 (API), 15432 (PostgreSQL)** on loopback. Verify all
   three are free before first start. Use only synthetic data. Do not reuse any
   existing checkout, credentials, database or media directories.
-- The automatic target requires rootless Linux user/network namespaces,
-  `unshare`, `nsenter`, and `pasta` with `--host-lo-to-ns-lo` support. The
-  installed controller creates a new network namespace before the checkout's
-  install or launch commands run. Only the three TCP ports are forwarded to
-  host IPv4 loopback; automatic forwards are disabled. Startup fails without
-  this boundary. The network namespace is not a sandbox for untrusted code.
+- The automatic target requires rootless Linux user, mount and network
+  namespaces, util-linux `unshare` with `--map-root-user` and `--map-auto`,
+  `nsenter`, and `pasta` with `--host-lo-to-ns-lo` and `--no-netns-quit` support.
+  The controller creates fresh namespaces without a Podman namespace keeper
+  and runs rootless Podman directly, with target-private temporary files and
+  file locks. Before the checkout's install or launch commands run, it verifies
+  the namespaces and loopback forwards. It forwards only the three TCP ports
+  to host IPv4 loopback. Startup fails without this boundary; the network
+  namespace is not a sandbox for untrusted code.
 - Stage the following four files from a reviewed, successfully checked **merged
   main** revision. Run these commands as the dedicated account from the staged
   tree. Install trusted control files outside the managed checkout and update

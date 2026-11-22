@@ -342,11 +342,20 @@ def runtime_stub(tmp_path: Path) -> tuple[dict[str, str], Path, list[str], list[
     (checkout / "ops").mkdir(parents=True)
     (checkout / "apps/web").mkdir(parents=True)
     bun = bin_dir / "bun"
-    bun.write_text("#!/bin/sh\nexit 0\n")
+    bun.write_text('#!/bin/sh\ntouch "$CANDIDATE_RAN.install"\n')
     bun.chmod(0o700)
+    podman = bin_dir / "podman"
+    podman.write_text(
+        '#!/bin/sh\n'
+        '# Fail before touching any Podman state, even against the old controller.\n'
+        '[ "$1" = --tmpdir ] && [ "$3" = --remote=false ] || exit 1\n'
+        'printf "%s\\n" "$2" "$XDG_RUNTIME_DIR" "$CONTAINERS_CONF_OVERRIDE" '
+        '"$_CONTAINERS_ROOTLESS_UID" "$_CONTAINERS_ROOTLESS_GID"\n'
+    )
+    podman.chmod(0o700)
     state = tmp_path / "state"
     state.mkdir()
-    runtime = tmp_path / "runtime"
+    runtime = tmp_path / "private runtime"
     runtime.mkdir()
     ready = tmp_path / "candidate-ran"
     # Reserve only loopback ports; even a broken controller must not cause a wildcard test bind.
@@ -355,11 +364,13 @@ def runtime_stub(tmp_path: Path) -> tuple[dict[str, str], Path, list[str], list[
         for sock in sockets:
             sock.bind(("127.0.0.1", 0))
         ports = [sock.getsockname()[1] for sock in sockets]
-    env = os.environ | {
+    env = {
         "STATE_DIRECTORY": str(state),
         "RUNTIME_DIRECTORY": str(runtime),
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "HOST_NET": os.readlink("/proc/self/ns/net"),
+        "HOST_UID": str(os.geteuid()),
+        "HOST_GID": str(os.getegid()),
         "CANDIDATE_RAN": str(ready),
         "EXTRA_TCP": str(ports[3]),
         "EXTRA_UDP": str(ports[4]),
@@ -367,18 +378,27 @@ def runtime_stub(tmp_path: Path) -> tuple[dict[str, str], Path, list[str], list[
     }
     (checkout / "ops/lite.sh").write_text(
         'exec "$TEST_PYTHON" -I - "$@" <<\'PY\'\n'
-        "import os, socket, sys\n"
+        "import os, socket, subprocess, sys\n"
         "from pathlib import Path\n"
         'assert os.readlink("/proc/self/ns/net") != os.environ["HOST_NET"]\n'
         'assert sys.argv[1] == "run" and sys.argv[5:] == ["", "isolated"]\n'
+        'assert os.geteuid() == os.getegid() == 0\n'
+        '# Model the checkout launcher clearing Podman environment before the call.\n'
+        'result = subprocess.check_output(["podman", "--remote=false"], text=True,\n'
+        '    env={k: os.environ[k] for k in ("PATH", "_CONTAINERS_USERNS_CONFIGURED")})\n'
+        'tmp, runtime, config, uid, gid = result.splitlines()\n'
+        'private = Path(os.environ["RUNTIME_DIRECTORY"]) / "podman"\n'
+        'assert Path(tmp) == private / "tmp" and Path(runtime) == private\n'
+        'assert Path(config).parent == private and Path(config).is_file()\n'
+        'assert (uid, gid) == (os.environ["HOST_UID"], os.environ["HOST_GID"])\n'
         "expected = socket.socket()\n"
         'expected.bind(("127.0.0.1", int(sys.argv[2])))\n'
         "expected.listen()\n"
         "extra = socket.socket()\n"
-        'extra.bind(("0.0.0.0", int(os.environ["EXTRA_TCP"])))\n'
+        'extra.bind(("127.0.0.1", int(os.environ["EXTRA_TCP"])))\n'
         "extra.listen()\n"
         "udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
-        'udp.bind(("0.0.0.0", int(os.environ["EXTRA_UDP"])))\n'
+        'udp.bind(("127.0.0.1", int(os.environ["EXTRA_UDP"])))\n'
         'Path(os.environ["CANDIDATE_RAN"]).touch()\n'
         "expected.settimeout(8)\n"
         'with expected.accept()[0] as peer: peer.sendall(b"isolated")\n'
@@ -399,38 +419,27 @@ def test_no_candidate_code_runs_when_namespace_is_unavailable(
     runtime_stub: tuple[dict[str, str], Path, list[str], list[int]],
 ) -> None:
     env, ready, command, _ = runtime_stub
-    podman = Path(env["PATH"].split(":")[0]) / "podman"
+    unshare = Path(env["PATH"].split(":")[0]) / "unshare"
     # Simulate a launcher reporting a PID without actually entering a new network namespace.
-    podman.write_text('#!/bin/sh\nshift 8\n[ "$1" != --mount ] || shift\nexec "$@"\n')
-    podman.chmod(0o700)
+    unshare.write_text('#!/bin/sh\nwhile [ "${1#--}" != "$1" ]; do shift; done\nexec "$@"\n')
+    unshare.chmod(0o700)
     result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=15)
     assert result.returncode != 0 and "No network isolation" in result.stderr
-    assert not ready.exists()
+    assert not ready.with_suffix(".install").exists() and not ready.exists()
 
 
 def test_runtime_forwards_only_explicit_loopback_ports(
     runtime_stub: tuple[dict[str, str], Path, list[str], list[int]],
 ) -> None:
     env, ready, command, ports = runtime_stub
-    if any(not shutil.which(binary) for binary in ("podman", "unshare", "pasta", "ss")):
+    if any(not shutil.which(binary) for binary in ("unshare", "pasta", "ss")):
         pytest.skip("Rootless namespace tools not installed")
     pasta_help = subprocess.check_output(["pasta", "--help"], text=True)
-    if "--host-lo-to-ns-lo" not in pasta_help:
-        pytest.skip("pasta lacks explicit loopback-to-loopback forwarding")
-    probe = [
-        "podman",
-        "--remote=false",
-        "--root",
-        env["STATE_DIRECTORY"] + "/containers",
-        "--runroot",
-        env["RUNTIME_DIRECTORY"] + "/containers",
-        "unshare",
-        "unshare",
-        "--net",
-        "true",
-    ]
+    if any(option not in pasta_help for option in ("--host-lo-to-ns-lo", "--no-netns-quit")):
+        pytest.skip("pasta lacks required namespace and forwarding options")
+    probe = ["unshare", "--map-root-user", "--map-auto", "--net", "--mount", "true"]
     if subprocess.run(probe, env=env, capture_output=True, timeout=15).returncode:
-        pytest.skip("Rootless Podman user/network namespaces are unavailable")
+        pytest.skip("Mapped rootless user/network/mount namespaces are unavailable")
     # Reject permissive forwarding arguments before invoking the real proxy, even on a regression.
     pasta = Path(env["PATH"].split(":")[0]) / "pasta"
     ftp = "127.0.0.1/" + ",".join(map(str, ports[:3]))
@@ -442,7 +451,7 @@ def test_runtime_forwards_only_explicit_loopback_ports(
         f"('-t', '-u', '-T', '-U')] == [('-t', {ftp!r}), ('-u', 'none'), "
         "('-T', 'none'), ('-U', 'none')]\n"
         "assert not any('ports' in arg or '-ns' in arg for arg in args if arg.startswith('--') "
-        "and arg != '--host-lo-to-ns-lo')\n"
+        "and arg not in ('--host-lo-to-ns-lo', '--no-netns-quit'))\n"
         f"os.execv({shutil.which('pasta')!r}, [{shutil.which('pasta')!r}, *args])\n"
     )
     pasta.chmod(0o700)
@@ -465,3 +474,4 @@ def test_runtime_forwards_only_explicit_loopback_ports(
         finally:
             if process.poll() is None:
                 process.terminate()
+                process.wait(timeout=25)
