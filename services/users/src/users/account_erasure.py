@@ -121,6 +121,8 @@ def _erase_local_data(session: Session, *, user_id: str, now: datetime) -> None:
     identifiers = {user_id}
     if deleted_username:
         identifiers.add(deleted_username)
+    if user.username_normalized:
+        identifiers.add(user.username_normalized)
 
     session.execute(delete(UserSession).where(UserSession.user_id == user_id))
     session.execute(delete(EmailVerificationToken).where(EmailVerificationToken.user_id == user_id))
@@ -136,10 +138,19 @@ def _erase_local_data(session: Session, *, user_id: str, now: datetime) -> None:
             (UserBlock.blocker_user_id == user_id) | (UserBlock.blocked_user_id == user_id)
         )
     )
-    follow_predicate = (Follow.follower_user_id == user_id) | (Follow.target_id == user_id)
+    incoming = Follow.target_id == user_id
     if deleted_username:
-        follow_predicate |= Follow.target_handle == deleted_username
-    session.execute(delete(Follow).where(follow_predicate))
+        # A legacy user follow may have no resolvable ID. A Page slug or a
+        # different user's stable ID must never be matched by handle alone.
+        incoming |= (Follow.target_handle == deleted_username) & ~(
+            select(ApplicationUser.id).where(ApplicationUser.id == Follow.target_id).exists()
+        )
+    session.execute(
+        delete(Follow).where(
+            (Follow.follower_user_id == user_id)
+            | (Follow.target_type.in_(("consumer", "artist")) & incoming)
+        )
+    )
     session.execute(delete(PageMembership).where(PageMembership.user_id == user_id))
     session.execute(
         delete(PageResidency).where(
@@ -169,23 +180,38 @@ def _erase_local_data(session: Session, *, user_id: str, now: datetime) -> None:
             report.target_id = "deleted-user"
             report.target_handle = "deleted-user"
     for audit_log in session.scalars(
-        select(SafetyAuditLog).where(
-            (SafetyAuditLog.actor_user_id == user_id) | (SafetyAuditLog.target_id == user_id)
+        select(SafetyAuditLog)
+        .where(
+            (SafetyAuditLog.actor_user_id == user_id)
+            | (SafetyAuditLog.target_id == user_id)
+            | (SafetyAuditLog.metadata_json["target_user_id"].as_string() == user_id)
+            | (SafetyAuditLog.metadata_json["artist_user_id"].as_string() == user_id)
         )
+        .order_by(SafetyAuditLog.id)
+        .with_for_update()
     ):
         if audit_log.actor_user_id == user_id:
             audit_log.actor_user_id = None
         if audit_log.target_id == user_id:
             audit_log.target_id = "deleted-user"
         audit_log.metadata_json = _scrub_metadata(audit_log.metadata_json, identifiers)
-    for auth_log in session.scalars(select(AuthAuditLog).where(AuthAuditLog.user_id == user_id)):
+    for auth_log in session.scalars(
+        select(AuthAuditLog)
+        .where(
+            (AuthAuditLog.user_id == user_id)
+            | (AuthAuditLog.metadata_json["target_user_id"].as_string() == user_id)
+        )
+        .order_by(AuthAuditLog.id)
+        .with_for_update()
+    ):
         # Security events are retained, but no stable account/network/device
         # identifiers remain attached to them after erasure.
-        auth_log.user_id = None
-        auth_log.subject_hash = None
-        auth_log.ip_hash = None
-        auth_log.user_agent_hash = None
-        auth_log.request_id = None
+        if auth_log.user_id == user_id:
+            auth_log.user_id = None
+            auth_log.subject_hash = None
+            auth_log.ip_hash = None
+            auth_log.user_agent_hash = None
+            auth_log.request_id = None
         auth_log.metadata_json = _scrub_metadata(auth_log.metadata_json, identifiers)
 
     user.status = "deleted"

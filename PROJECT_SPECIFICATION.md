@@ -283,10 +283,10 @@ name (namespace, env var prefix, headers, cookies, buckets). See `docs/rebrandin
   `events`, `media`, then local data. Failed stages retry with exponential backoff capped at
   one hour. `social`, `events` and `media` write erasure tombstones that fence later writes
   by that owner.
-- Local erasure deletes sessions, tokens, preferences, notifications, blocks, follows,
-  memberships, residencies and key envelopes; clears email, username and credentials; renames
-  the consumer profile to "Deleted User"; removes artist profile and onboarding data; and
-  detaches identifiers from reports and audit logs while keeping the security events.
+- Users serializes relationship writes on the affected accounts and rejects inactive accounts.
+  Erasure removes user follows, not unrelated Page follows with a matching handle. It deletes
+  sessions, tokens, preferences, notifications, blocks, memberships, residencies and key envelopes;
+  clears credentials, identity, artist and onboarding data; anonymizes the consumer profile and retained audits/reports.
 
 ---
 

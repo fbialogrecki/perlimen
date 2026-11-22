@@ -6,6 +6,7 @@ import socket
 import subprocess
 import sys
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
@@ -15,9 +16,22 @@ import httpx
 from media.domain.models import AccountErasureTombstone, MediaAsset, MediaDerivative
 from perlimen_lite.database import endpoint, engine_for, required
 from PIL import Image
-from sqlalchemy import select
+from sqlalchemy import Engine, or_, select, text
 from sqlalchemy.orm import Session
-from users.domain.models import AccountErasureJob, ApplicationUser, PasswordResetToken, UserSession
+from users.db.base import lock_user_write_domains
+from users.domain.models import (
+    AccountErasureJob,
+    ApplicationUser,
+    AuthAuditLog,
+    Follow,
+    NotificationEvent,
+    PageMembership,
+    PageResidency,
+    PasswordResetToken,
+    SafetyAuditLog,
+    UserBlock,
+    UserSession,
+)
 
 
 def wait_until[T](probe: Callable[[], T | None], timeout: float = 10) -> T:
@@ -60,6 +74,43 @@ def serve_lite(client: httpx.Client, port: int) -> Iterator[subprocess.Popen[byt
             process.wait(timeout=5)
 
 
+def delete_ahead_of_follow(
+    engine: Engine,
+    owner_id: str,
+    owner: httpx.Client,
+    follow: Callable[[], httpx.Response],
+) -> None:
+    with ThreadPoolExecutor(max_workers=2) as pool, Session(engine) as holder:
+        lock_user_write_domains(holder, [owner_id])
+        try:
+
+            def wait_for_waiters(count: int) -> None:
+                def waiting() -> bool | None:
+                    actual = holder.scalar(
+                        text("""
+                        SELECT count(*) FROM pg_locks AS waiting
+                        JOIN pg_locks AS held USING (locktype, database, classid, objid, objsubid)
+                        WHERE held.pid = pg_backend_pid() AND held.granted
+                          AND held.locktype = 'advisory' AND NOT waiting.granted
+                        """)
+                    )
+                    return True if actual == count else None
+
+                wait_until(waiting, timeout=2)
+
+            # Lite has two Users connections. Queue DELETE first, then prove
+            # the follow waits on the same lock before allowing DELETE to commit.
+            deletion = pool.submit(owner.delete, "/users/v1/me", timeout=15)
+            wait_for_waiters(1)
+            request = pool.submit(follow)
+            wait_for_waiters(2)
+        finally:
+            holder.rollback()
+        assert deletion.result(timeout=15).status_code == 202
+        response = request.result(timeout=15)
+        assert response.status_code == 404, response.text
+
+
 def check_erasure_restart(root: Path) -> None:
     from media.api.routes import _acquire_owner_write_lock
 
@@ -70,6 +121,7 @@ def check_erasure_restart(root: Path) -> None:
     posts = "/social/v1/posts"
     group = "techno-warsaw"
     follow = "/events/v1/events/pgdoor-event/follow"
+    user_follows = "/users/v1/me/follows"
     users_engine = engine_for(endpoint(), "users", "runtime")
     media_engine = engine_for(endpoint(), "media", "runtime")
     png = BytesIO()
@@ -112,14 +164,49 @@ def check_erasure_restart(root: Path) -> None:
         return None
 
     try:
-        with connect() as owner, connect() as other, connect() as second_session:
+        with (
+            connect() as owner,
+            connect() as other,
+            connect() as second_session,
+            connect() as blocker,
+        ):
             username = "erasure-fixture"
             login = {"email_or_username": username, "password": password}
             with serve_lite(owner, port) as original_process:
                 principal = register(owner, username)
                 owner_id = principal["X-Threshold-User-Id"]
                 control = register(other, "erasure-control")
+                register(blocker, "erasure-blocker")
                 assert second_session.post(f"{auth}/login", json=login).status_code == 200
+                page = other.post(
+                    "/users/v1/pages",
+                    json={"slug": username, "display_name": "Control Page", "page_type": "club"},
+                )
+                assert page.status_code == 201, page.text
+                page_id = page.json()["id"]
+                for kind in ("consumer", "page"):
+                    response = other.post(
+                        user_follows, json={"target_type": kind, "target_handle": username}
+                    )
+                    assert response.status_code == 200, response.text
+                assert {f["target_type"] for f in other.get(user_follows).json()} == {
+                    "consumer",
+                    "page",
+                }
+                assert owner.post("/users/v1/me/artist", json={"role": "DJ"}).status_code == 200
+                assert (
+                    owner.post(
+                        user_follows,
+                        json={"target_type": "page", "target_handle": username},
+                    ).status_code
+                    == 200
+                )
+                members = f"/users/v1/pages/{username}/members/{username}"
+                invite = f"/users/v1/pages/{username}/residencies/{username}/invite"
+                blocks = "/users/v1/me/blocks"
+                assert other.put(members, json={"role": "editor"}).status_code == 200
+                assert other.post(invite).status_code == 201
+                assert blocker.post(blocks, json={"username": username}).status_code == 201
                 for client, identity in ((owner, principal), (other, control)):
                     assert client.get(f"{auth}/me").status_code == 200
                     assert (
@@ -161,7 +248,19 @@ def check_erasure_restart(root: Path) -> None:
                 assert before.status_code == 200 and before.json()["author_user_id"] == owner_id
 
                 root.chmod(0o755)
-                assert owner.delete("/users/v1/me").status_code == 202
+                delete_ahead_of_follow(
+                    users_engine,
+                    owner_id,
+                    owner,
+                    lambda: other.post(
+                        user_follows,
+                        json={"target_type": "artist", "target_handle": username},
+                        timeout=15,
+                    ),
+                )
+                assert blocker.post(blocks, json={"username": username}).status_code == 404
+                assert other.post(invite).status_code == 404
+                assert other.put(members, json={"role": "editor"}).status_code == 404
                 assert not owner.cookies
                 old_refresh = second_session.cookies["threshold_refresh"]
                 assert second_session.get(f"{auth}/me").status_code == 401
@@ -230,7 +329,47 @@ def check_erasure_restart(root: Path) -> None:
                     user = session.get(ApplicationUser, owner_id)
                     assert user is not None and user.status == "deleted"
                     assert user.username is None and user.email is None and user.credential is None
+                    for table, predicate in (
+                        (
+                            Follow,
+                            or_(Follow.follower_user_id == owner_id, Follow.target_id == owner_id),
+                        ),
+                        (UserBlock, UserBlock.blocked_user_id == owner_id),
+                        (PageMembership, PageMembership.user_id == owner_id),
+                        (PageResidency, PageResidency.artist_user_id == owner_id),
+                        (
+                            NotificationEvent,
+                            or_(
+                                NotificationEvent.user_id == owner_id,
+                                NotificationEvent.actor_user_id == owner_id,
+                            ),
+                        ),
+                    ):
+                        assert session.scalar(select(table).where(predicate)) is None
+                    for metadata, action, key in (
+                        (
+                            AuthAuditLog.metadata_json,
+                            AuthAuditLog.event_type == "page.member_upserted",
+                            "target_user_id",
+                        ),
+                        (
+                            SafetyAuditLog.metadata_json,
+                            SafetyAuditLog.action == "page.member_upserted",
+                            "target_user_id",
+                        ),
+                        (
+                            SafetyAuditLog.metadata_json,
+                            SafetyAuditLog.action == "residency.invited",
+                            "artist_user_id",
+                        ),
+                    ):
+                        assert session.scalars(select(metadata).where(action)).one()[key] is None
                 assert other.get(f"{auth}/me").status_code == 200
+                remaining_follows = other.get(user_follows)
+                assert remaining_follows.status_code == 200
+                assert [(f["target_type"], f["target_id"]) for f in remaining_follows.json()] == [
+                    ("page", page_id)
+                ]
                 after = other.get(thread, headers=control)
                 replies = other.get(f"{thread}/comments", headers=control)
                 assert after.status_code == replies.status_code == 200
