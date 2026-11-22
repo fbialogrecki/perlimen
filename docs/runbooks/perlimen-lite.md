@@ -114,3 +114,85 @@ ownership and checkout SHA, API readiness, and the same synthetic account
 through the web BFF at every stage. It stops the transient unit and removes the
 checkout; the private synthetic state directory printed at startup stays stopped.
 This is not a permanent deployment mechanism or a replacement for legacy CI/CD.
+
+## Paired backup and restore rehearsal
+
+Use two dedicated loopback-only Lite PostgreSQL 17 instances, separate volumes,
+separate private media roots and synthetic accounts only. This procedure does
+not use or replace CNPG, PVCs or legacy backup jobs. Restore only an archive
+pair you created and trust. Record the source checkout SHA for the rehearsal
+and use that revision for restore verification.
+
+1. In the source Lite API, register a control account and one to erase. Upload
+   an image for each and record the control asset's logical keys, sizes and
+   SHA-256 digests for the original and both derivatives. Request account
+   erasure and wait for completion, not just HTTP `202`. Stop every source
+   writer (including the API's erasure worker) before starting the dump, and
+   keep them stopped until both captures finish. Leave **only** the dedicated
+   source PostgreSQL running: its snapshot does not include the media files.
+2. Verify `/mnt/backup` is mounted on a different physical disk from the source
+   database and media. In Bash, set `SRC_MEDIA` to the private media root and
+   `SRC_PG_PORT` to the verified source loopback port. Use PostgreSQL 17
+   clients and configure bootstrap authentication with a private libpq
+   password file, not command-line secrets. Clients can also run inside the
+   matching container; redirect stdout to the host backup directory.
+
+   ```bash
+   set -euo pipefail
+   umask 077
+   export PGHOSTADDR=127.0.0.1
+   findmnt --mountpoint /mnt/backup
+   src=(--host=127.0.0.1 --port="${SRC_PG_PORT:?}" --username=lite_bootstrap --no-password)
+   backup=$(mktemp -d /mnt/backup/perlimen-lite-XXXXXXXX)
+   pg_dump "${src[@]}" --format=custom --dbname=perlimen_lite > "$backup/lite.dump"
+   tar -C "${SRC_MEDIA:?}" -cf "$backup/media.tar" .
+   (cd "$backup" && sha256sum lite.dump media.tar > SHA256SUMS)
+   sync -f "$backup"
+   ```
+
+3. On the new target instance initialize only the administrative database
+   `postgres` with `lite_bootstrap`. Confirm that `perlimen_lite` does not
+   exist. Before restore, create the eight named roles
+   `lite_{users,social,events,media}_{migration,runtime}` as `LOGIN NOINHERIT`
+   with distinct SCRAM passwords and no elevated attributes or memberships.
+   The database dump does not contain these role definitions or server-side
+   auth keys. Supply DB credentials and auth keys separately; use the same
+   synthetic password pepper and session HMAC key to check existing accounts
+   and sessions. Follow the [Lite backend environment contract](../perlimen-lite-backend.md).
+   Do not run migrations on the target before restoring.
+4. Set `DST_PG_PORT` to the verified **target** loopback port and `backup` to
+   the paired backup directory. Set `DST_MEDIA` to a new directory path outside
+   the checkout and any web root. Run as the destination API's OS user.
+   Keep owners and privileges on restore; do not add `--clean`, `--no-owner`
+   or `--no-acl`. If verification or either restore step fails, leave the
+   target offline and retry with new empty targets. Preserve the source and
+   all backup files.
+
+   ```bash
+   set -euo pipefail
+   umask 077
+   export PGHOSTADDR=127.0.0.1
+   dst=(--host=127.0.0.1 --port="${DST_PG_PORT:?}" --username=lite_bootstrap --no-password)
+   test "$(psql "${dst[@]}" -XAt -v ON_ERROR_STOP=1 --dbname=postgres \
+       -c "SELECT EXISTS (SELECT FROM pg_database WHERE datname = 'perlimen_lite')")" = f
+   (cd "${backup:?}" && sha256sum --strict --check SHA256SUMS)
+   mkdir -m 700 "${DST_MEDIA:?}"
+   pg_restore "${dst[@]}" --create --exit-on-error --dbname=postgres < "$backup/lite.dump"
+   tar --extract --same-permissions --no-same-owner \
+       --file "$backup/media.tar" -C "$DST_MEDIA"
+   ```
+
+5. Start the restored API on loopback with **only** its runtime credentials.
+   Require `/readyz` to pass and check that runtime roles cannot read sibling
+   schemas or change DDL or migration ledgers. Match Media rows and their
+   logical keys and sizes to the `0600` files in the `0700` directory, and
+   compare source and restored digests. Verify control login and owner reads
+   of both derivatives; the original must be verified on disk, never served
+   over HTTP. Check that the erased account cannot sign in and its prior
+   session, blob files and media inventory have not returned. Stop both
+   disposable instances without deleting volumes or copies.
+
+A matched restore proves the state of that backup, not erasures requested
+later. Never reconnect a restore made before an erasure to users: reconcile
+those requests and verify deletion offline first. This synthetic drill does
+not establish a schedule, retention policy or production recovery procedure.
