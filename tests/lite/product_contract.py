@@ -171,21 +171,20 @@ class ProductContract(unittest.TestCase):
 
     def event(self, owner: httpx.Client, page_id: str, suffix: str) -> dict[str, Any]:
         response = self.call(
-            owner,
-            "POST",
-            "/api/events",
-            201,
-            json={
-                "page_id": page_id,
-                "slug": self.username(suffix),
-                "title": f"Lite Night {suffix}",
-                "starts_at": (datetime.now(UTC) + timedelta(days=2)).isoformat(),
-                "city": CITY,
-                "location_mode": "tba",
-                "description": "Public synthetic event fixture",
-            },
+            owner, "POST", "/api/events", 201, json=self.event_payload(page_id, suffix)
         )
         return cast(dict[str, Any], response.json())
+
+    def event_payload(self, page_id: str, suffix: str) -> dict[str, Any]:
+        return {
+            "page_id": page_id,
+            "slug": self.username(suffix),
+            "title": f"Lite Night {suffix}",
+            "starts_at": (datetime.now(UTC) + timedelta(days=2)).isoformat(),
+            "city": CITY,
+            "location_mode": "tba",
+            "description": "Public synthetic event fixture",
+        }
 
     def document(self, client: httpx.Client, path: str, *, absent: str = "") -> Document:
         response = self.call(client, "GET", path, 200, headers={"User-Agent": "Googlebot"})
@@ -430,7 +429,17 @@ class ProductContract(unittest.TestCase):
         guest = self.account("viewer")
         door = self.account("door")
         page = self.page(owner, "venue")
-        event = self.event(owner, page["id"], "door-one")
+        publication = self.event_payload(page["id"], "door-one")
+        event = self.call(owner, "POST", "/api/events", 201, json=publication).json()
+        self.call(owner, "POST", "/api/events", 409, json=publication)
+        group = "/api/social/groups/techno-warsaw"
+        self.call(owner, "POST", f"{group}/membership", 200)
+        group_posts = self.call(owner, "GET", f"{group}/posts", 200).json()
+        announcements = [
+            post for post in group_posts["items"] if post.get("event_id") == event["id"]
+        ]
+        self.assertEqual(len(announcements), 1)
+        self.assertEqual(announcements[0]["author_type"], "system")
         other = self.event(owner, page["id"], "door-two")
         event_api, other_api = (f"/api/events/{item['slug']}" for item in (event, other))
         guest_role = f"/api/pages/{page['slug']}/members/{self.username('viewer')}"
@@ -441,19 +450,41 @@ class ProductContract(unittest.TestCase):
         self.call(guest, "PUT", door_role, 403, json={"role": "admin"})
         self.call(owner, "DELETE", guest_role, 204)
         self.call(guest, "PATCH", event_api, 403, json={"title": "Revoked"})
-        self.call(self.client(), "GET", f"{event_api}/guestlist", 401)
-        self.call(
+        anonymous = self.client()
+        self.call(anonymous, "GET", f"{event_api}/guestlist", 401)
+        invited = self.call(
             owner, "POST", f"{event_api}/guestlist", 201, json={"username": self.username("viewer")}
+        ).json()
+        roster = self.call(owner, "GET", f"{event_api}/guestlist", 200)
+        self.assertIn("no-store", roster.headers.get("cache-control", ""))
+        self.assertEqual([entry["id"] for entry in roster.json()], [invited["id"]])
+        self.call(guest, "GET", f"{event_api}/guestlist", 403)
+        notices = self.call(guest, "GET", "/api/notifications", 200).json()
+        self.assertTrue(
+            any(n["type"] == "guestlist.added" and n["target_id"] == invited["id"] for n in notices)
         )
-        self.document(self.client(), f"/events/{event['slug']}", absent=self.username("viewer"))
+        own_context = self.call(guest, "GET", f"{event_api}/viewer-context", 200).json()
+        self.assertTrue(own_context["can_mint_qr"])
+        self.assertFalse(own_context["can_manage_guestlist"])
+        public = self.document(
+            anonymous, f"/events/{event['slug']}", absent=self.username("viewer")
+        )
+        self.assertIn("Edited by fixture editor", public.headings)
+        self.assertIn("Edited by fixture editor", public.meta.get("og:title", ""))
+        self.assertNotIn(invited["id"], public.html)
         assignment = f"{event_api}/door-staff/by-username/{self.username('door')}"
         self.call(owner, "PUT", assignment, (200, 201))
         self.call(door, "GET", f"{event_api}/guestlist", 403)
+        door_context = self.call(door, "GET", f"{event_api}/viewer-context", 200).json()
+        self.assertTrue(door_context["can_check_in"])
+        self.assertIsNone(door_context["active_guest_access"])
 
         qr_path = f"{event_api}/guestlist/me/qr-token"
         old = self.call(guest, "POST", qr_path, 201).json()["token"]
         issued_at = datetime.now(UTC)
-        issued = self.call(guest, "POST", qr_path, 201).json()
+        issuance = self.call(guest, "POST", qr_path, 201)
+        self.assertIn("no-store", issuance.headers.get("cache-control", ""))
+        issued = issuance.json()
         token = issued["token"]
         self.assertTrue(old != token and len(token) >= 32, "expected separate opaque QR values")
         expiry = datetime.fromisoformat(issued["expires_at"])
@@ -461,9 +492,21 @@ class ProductContract(unittest.TestCase):
         self.assertLessEqual(expiry, datetime.now(UTC) + timedelta(seconds=300))
         self.call(owner, "POST", f"{other_api}/check-in", 404, json={"token": token})
         self.call(guest, "POST", f"{event_api}/check-in", 403, json={"token": token})
+        self.call(
+            guest, "POST", f"{event_api}/check-in", 403, json={"token": secrets.token_urlsafe(32)}
+        )
         self.call(door, "POST", f"{event_api}/check-in", 409, json={"token": old})
         door2 = self.client()
-        door2.cookies.update(door.cookies)
+        self.call(
+            door2,
+            "POST",
+            "/api/auth/login",
+            200,
+            json={
+                "emailOrUsername": self.username("door"),
+                "password": self.password,
+            },
+        )
         barrier = Barrier(2, timeout=5)
 
         def redeem(client: httpx.Client) -> httpx.Response:
@@ -475,7 +518,9 @@ class ProductContract(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=2) as pool:
             responses = list(pool.map(redeem, (door, door2)))
         self.assertEqual(sorted(result.status_code for result in responses), [200, 409])
-        body = next(result.json() for result in responses if result.status_code == 200)
+        admission = next(result for result in responses if result.status_code == 200)
+        self.assertIn("no-store", admission.headers.get("cache-control", ""))
+        body = admission.json()
         self.assertEqual(body["status"], "checked_in")
         self.assertEqual(body.get("username", body["display_name"]), self.username("viewer"))
         self.assertFalse(set(body) - {"status", "display_name", "username"})
@@ -567,6 +612,30 @@ class ProductContract(unittest.TestCase):
                 with Image.open(BytesIO(result.content)) as image:
                     self.assertEqual((image.format, image.size), ("WEBP", (size, size)))
                     image.load()
+
+        page = self.page(owner, "poster-room")
+        poster = self.upload(owner, "event_poster").json()["id"]
+        poster_root = f"{UPLOAD}/assets/{poster}"
+        poster_path = f"{poster_root}/post_1280.webp"
+        self.call(anon, "GET", poster_path, 404)
+        event = self.call(
+            owner,
+            "POST",
+            "/api/events",
+            201,
+            json={**self.event_payload(page["id"], "poster"), "poster_media_asset_id": poster},
+        ).json()
+        self.assertEqual(event["poster_media_asset_id"], poster)
+        doc = self.document(anon, f"/events/{event['slug']}")
+        self.assertIn(event["title"], doc.headings)
+        self.assertEqual(doc.meta.get("og:image"), f"{self.origin}{poster_path}")
+        result = self.call(anon, "GET", poster_path, 200)
+        self.assertEqual(result.headers["content-type"], "image/webp")
+        self.assertIn("no-store", result.headers["cache-control"])
+        with Image.open(BytesIO(result.content)) as image:
+            self.assertEqual(image.format, "WEBP")
+            image.load()
+        self.call(anon, "GET", f"{poster_root}/original", 404)
 
     def test_account_erasure_revokes_then_removes(self) -> None:
         account = self.account("erase")

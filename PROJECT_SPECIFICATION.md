@@ -37,43 +37,43 @@ Keep this map correct: line ranges shift whenever content is added or removed.
 | --- | --- | --- |
 | **1** | **Specification governance** — changing anything in this file | 80-90 |
 | **2** | **Vision and scope** — you need product framing or the MVP boundary | 91-109 |
-| **3** | **Functional requirements** — changing product behavior | 110-285 |
+| **3** | **Functional requirements** — changing product behavior | 110-288 |
 | 3.1 | Access model and web routes | 112-128 |
 | 3.2 | Accounts and authentication | 129-149 |
 | 3.3 | Identity, profiles, Pages and follows | 150-167 |
 | 3.4 | Groups, posts and comments | 168-178 |
 | 3.5 | Feed | 179-192 |
-| 3.6 | Events | 193-207 |
-| 3.7 | Guestlists and check-in | 208-223 |
-| 3.8 | Media | 224-239 |
-| 3.9 | Notifications | 240-248 |
-| 3.10 | Search and mentions | 249-257 |
-| 3.11 | Safety: blocks, reports, moderation | 258-270 |
-| 3.12 | Account erasure | 271-285 |
-| **4** | **Non-functional requirements** — touching limits, i18n, observability, health | 286-303 |
-| **5** | **System context** — you need the repo layout or the ownership split | 304-342 |
-| 5.1 | Repository layout | 306-326 |
-| 5.2 | Service ownership | 327-342 |
-| **6** | **Architecture** — touching runtime, service transports, CI/CD or GitOps | 343-395 |
-| 6.1 | Runtime | 345-369 |
-| 6.2 | Service-to-service transports | 370-382 |
-| 6.3 | Build, publication and deployment | 383-395 |
-| **7** | **Security** — touching auth, trust boundaries, secrets or headers | 396-413 |
-| **8** | **Privacy and data retention** — touching personal data, deletion or backups | 414-427 |
-| **9** | **Data model** — changing tables or migrations | 428-464 |
-| 9.1 | users | 433-443 |
-| 9.2 | social | 444-449 |
-| 9.3 | events | 450-457 |
-| 9.4 | media | 458-464 |
-| **10** | **API contract** — adding or changing an endpoint | 465-544 |
-| 10.1 | Conventions | 467-472 |
-| 10.2 | users | 473-494 |
-| 10.3 | social | 495-508 |
-| 10.4 | events | 509-524 |
-| 10.5 | media and auth-gateway | 525-531 |
-| 10.6 | Web BFF | 532-544 |
-| **11** | **Test plan** — you need test locations, gates or CI jobs | 545-560 |
-| **12** | **References** — you need operational detail kept out of this file | 561-570 |
+| 3.6 | Events | 193-209 |
+| 3.7 | Guestlists and check-in | 210-226 |
+| 3.8 | Media | 227-242 |
+| 3.9 | Notifications | 243-251 |
+| 3.10 | Search and mentions | 252-260 |
+| 3.11 | Safety: blocks, reports, moderation | 261-273 |
+| 3.12 | Account erasure | 274-288 |
+| **4** | **Non-functional requirements** — touching limits, i18n, observability, health | 289-306 |
+| **5** | **System context** — you need the repo layout or the ownership split | 307-345 |
+| 5.1 | Repository layout | 309-329 |
+| 5.2 | Service ownership | 330-345 |
+| **6** | **Architecture** — touching runtime, service transports, CI/CD or GitOps | 346-398 |
+| 6.1 | Runtime | 348-372 |
+| 6.2 | Service-to-service transports | 373-385 |
+| 6.3 | Build, publication and deployment | 386-398 |
+| **7** | **Security** — touching auth, trust boundaries, secrets or headers | 399-416 |
+| **8** | **Privacy and data retention** — touching personal data, deletion or backups | 417-430 |
+| **9** | **Data model** — changing tables or migrations | 431-467 |
+| 9.1 | users | 436-446 |
+| 9.2 | social | 447-452 |
+| 9.3 | events | 453-460 |
+| 9.4 | media | 461-467 |
+| **10** | **API contract** — adding or changing an endpoint | 468-547 |
+| 10.1 | Conventions | 470-475 |
+| 10.2 | users | 476-497 |
+| 10.3 | social | 498-511 |
+| 10.4 | events | 512-527 |
+| 10.5 | media and auth-gateway | 528-534 |
+| 10.6 | Web BFF | 535-547 |
+| **11** | **Test plan** — you need test locations, gates or CI jobs | 548-563 |
+| **12** | **References** — you need operational detail kept out of this file | 564-573 |
 
 ---
 
@@ -202,6 +202,8 @@ name (namespace, env var prefix, headers, cookies, buckets). See `docs/rebrandin
 - `GET /v1/events` lists events by city, Page, artist, line-up artist or text, sorted by
   start or creation time, with URL-safe base64 timestamp cursors. Event detail pages are
   public with SSR and Open Graph metadata.
+- Lite replays the Social announcement on an exact create retry from the original creator.
+  The endpoint still returns the existing slug conflict; Social keeps at most one post per event.
 - Signed-in users follow and boost events. A boost is social support, not an RSVP or paid
   promotion.
 
@@ -209,14 +211,15 @@ name (namespace, env var prefix, headers, cookies, buckets). See `docs/rebrandin
 
 - Guestlists are private. Event managers add and remove guests; each line-up artist adds
   guests up to a per-event quota set by managers (`/guestlist/dj`, `/guestlist/quotas/{id}`).
-  There is no public request, invite-code or discovery flow.
+  There is no public request, invite-code or discovery flow. Private BFF reads and QR responses
+  are not cacheable.
 - Guests see their own access (`/v1/events/{slug}/access`). Adding and removing guests
   notifies the guest (`guestlist.added`, `guestlist.removed`).
 - Check-in: the guest mints a QR token (`/guestlist/me/qr-token`), an opaque 32-byte random
   value stored as a hash, valid 300 seconds, single use; minting revokes the guest's earlier
-  unused tokens. Managers and assigned door staff redeem it (`/check-in`). Expired, used or
-  revoked tokens and already-checked-in guests are rejected. A token is bound to one event
-  and guestlist entry and carries no personal data or IDs. The check-in response shows only
+  unused tokens. Only managers and assigned door staff can check token status or redeem it
+  (`/check-in`). Expired, used or revoked tokens and already-checked-in guests are rejected.
+  A token is bound to one event and guestlist entry and carries no personal data or IDs. The check-in response shows only
   the status and the guest's name. Check-in proves account control, not legal identity.
 - Door staff are assigned by username. Access changes are written to
   `event_access_audit_logs`.
@@ -371,10 +374,10 @@ See [Perlimen Lite backend](docs/perlimen-lite-backend.md) for the local configu
 
 | Transport | Flows |
 | --- | --- |
-| In-process owner API (Lite) | Social follows, blocks, mention resolution and user notifications; each call uses the owner's runtime login |
+| In-process owner API (Lite) | Social follows, blocks, mentions and notifications; Events Page roles, artist and user references, guest and update notifications, and city announcements; media asset validation. Each call uses the owner's runtime login |
 | NATS request/reply (standalone) | `users.current_profile.v1` (auth-gateway → users), `users.follow.list_following.v1` (social → users) |
 | NATS pub/sub (standalone) | `users.block.changed.v1` (users → social) |
-| HTTP `/internal/v1/*` with `X-Threshold-Internal-Token` | Everything else: Page roles and artist lookups (events → users), notifications and mention lookups, event announcements (events → social), account erasure (users → social/events/media), media asset validation |
+| HTTP `/internal/v1/*` with `X-Threshold-Internal-Token` | Standalone cross-service calls and integrations not moved in-process: Page roles and artist lookups (events → users), notifications and mention lookups, event announcements (events → social), account erasure (users → social/events/media), media asset validation |
 
 The BFF sends `social`, `events` and `media` the internal token and session-derived identity
 (`X-Threshold-User-Id` / `X-Threshold-Username`). Product auth uses session cookies; in Lite

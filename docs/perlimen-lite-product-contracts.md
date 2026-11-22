@@ -29,8 +29,9 @@ Graph image URL points to the disposable instance.
 The suite checks raw anonymous SSR HTML and Open Graph tags; protected `/app`
 and the posts API; login, Origin, cookie scope, rotation and revocation; followed
 and group Feed items and the first API and full HTML reads after a block, with
-an unblocked author as a control; event roles, assigned staff and single-use
-event-bound QR; upload validation, ownership, private attachments and the
+an unblocked author as a control; event roles, one city announcement on publish
+retry, private guestlists, assigned staff and single-use event-bound QR; upload
+validation, ownership, private attachments and the
 anonymous Open Graph WebP; and immediate session revocation followed by
 asynchronous erasure of identity markers from the retained post payload and
 thread HTML. It doesn't require browser hydration and doesn't prove DB lock

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from alembic.script import ScriptDirectory
 from events.api.routes import router as events_router
+from events.owner import get_event_owner
 from fastapi import APIRouter, Depends, FastAPI, HTTPException
 from media.api.routes import router as media_router
 from social.api.routes import router as social_router
@@ -27,6 +28,7 @@ from events import main_dependencies as events
 from media import main_dependencies as media
 from perlimen_common.health import ok
 from perlimen_lite.database import DOMAINS, endpoint, engine_for, migration_config, required, role
+from perlimen_lite.events import LiteEventOwners
 from perlimen_lite.media_access import local_asset_lookup, media_access_router
 from perlimen_lite.media_storage import LocalMediaStorage
 from perlimen_lite.social import LiteSocialOwner
@@ -98,6 +100,8 @@ def create_app() -> FastAPI:
     app.add_exception_handler(SessionAuthenticationError, session_authentication_error)
     social_owner = LiteSocialOwner(factories["users"], factories["events"])
     app.dependency_overrides[get_social_owner] = lambda: social_owner
+    event_owner = LiteEventOwners(factories["users"], factories["social"]).port()
+    app.dependency_overrides[get_event_owner] = lambda: event_owner
 
     def local_upload_storage() -> LocalMediaStorage:
         if not storage.ready():

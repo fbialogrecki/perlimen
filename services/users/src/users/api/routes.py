@@ -752,7 +752,11 @@ def get_active_user_refs(
     _: Annotated[None, Depends(require_internal_token)],
     session: DbSession,
 ) -> list[ActiveUserRefResponse]:
-    user_ids = list(dict.fromkeys(payload.user_ids))
+    return active_user_refs(session, payload.user_ids)
+
+
+def active_user_refs(session: Session, ids: list[str]) -> list[ActiveUserRefResponse]:
+    user_ids = list(dict.fromkeys(ids))
     if not user_ids:
         return []
     refs = {
@@ -785,6 +789,13 @@ def get_page_membership(
     _: Annotated[None, Depends(require_internal_token)],
     session: DbSession,
 ) -> PageMembershipResponse:
+    role = active_page_role(session, page_id, user_id)
+    if role is None:
+        raise HTTPException(status_code=404, detail="not a member")
+    return PageMembershipResponse(role=role)
+
+
+def active_page_role(session: Session, page_id: str, user_id: str) -> str | None:
     membership = session.scalar(
         select(PageMembership)
         .join(ApplicationUser, ApplicationUser.id == PageMembership.user_id)
@@ -794,9 +805,7 @@ def get_page_membership(
             ApplicationUser.status == "active",
         )
     )
-    if membership is None:
-        raise HTTPException(status_code=404, detail="not a member")
-    return PageMembershipResponse(role=membership.role.value)
+    return membership.role.value if membership is not None else None
 
 
 @router.get("/internal/v1/blocks", response_model=list[BlockPairResponse])
@@ -940,7 +949,11 @@ def get_internal_artist_references(
     _: Annotated[None, Depends(require_internal_token)],
     session: DbSession,
 ) -> list[ArtistReferenceResponse]:
-    artist_profile_ids = list(dict.fromkeys(payload.artist_profile_ids))
+    return active_artist_refs(session, payload.artist_profile_ids)
+
+
+def active_artist_refs(session: Session, ids: list[str]) -> list[ArtistReferenceResponse]:
+    artist_profile_ids = list(dict.fromkeys(ids))
     if not artist_profile_ids:
         return []
     refs = {

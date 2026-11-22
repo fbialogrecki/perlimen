@@ -22,7 +22,7 @@ from sqlalchemy import select, update
 from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
 
-from events import users_client
+from events import social_client, users_client
 
 TOKEN_HEADERS = {"X-Threshold-Internal-Token": "test-internal-token"}
 USER_HEADERS = {
@@ -103,7 +103,7 @@ def test_create_event_crossposts_once_to_official_city_group(
         )
         return True
 
-    monkeypatch.setattr(routes, "_announce_event_city_group", _announce_event_city_group)
+    monkeypatch.setattr(social_client, "announce_event", _announce_event_city_group)
 
     create_response = client.post("/v1/events", headers=USER_HEADERS, json=EVENT_PAYLOAD)
     update_response = client.patch(
@@ -136,7 +136,7 @@ def test_create_event_succeeds_when_city_crosspost_has_no_group(
     def _missing_group(_settings: object, _event: Event) -> bool:
         return False
 
-    monkeypatch.setattr(routes, "_announce_event_city_group", _missing_group)
+    monkeypatch.setattr(social_client, "announce_event", _missing_group)
     response = TestClient(app).post("/v1/events", headers=USER_HEADERS, json=EVENT_PAYLOAD)
 
     assert response.status_code == 201
