@@ -91,3 +91,26 @@ It submits the real reset form and verifies single use, session revocation and
 login with the new password. After shutdown it checks the unit journal and any
 Next dev trace/log artifacts for both credentials, reporting only counts and
 booleans. The disposable database remains stopped, not deleted.
+
+## Disposable rollout and rollback rehearsal
+
+From a trusted checkout containing `ci/lite/verify_main_ci.py`, with up-to-date
+`origin/main` and the prerequisites above, run:
+
+```bash
+python3 -I ops/tests/lite-rollout-drill.py --disposable <baseline-sha> <candidate-sha>
+```
+
+Use two full, compatible main-push SHAs, oldest first. The command replays the
+candidate event once, without a release or a persistent watcher. It verifies
+exact-SHA `ci-ok` before running either revision, rejects changes to migration
+and dependency inputs, and rolls back to the known-good revision after the
+candidate check, including on candidate startup or health failure. There is
+brief downtime between revisions; database migrations are not downgraded.
+
+The drill uses a fresh checkout-specific PostgreSQL store, generated dev-only
+credentials and three loopback ports. It checks the live listeners' process
+ownership and checkout SHA, API readiness, and the same synthetic account
+through the web BFF at every stage. It stops the transient unit and removes the
+checkout; the private synthetic state directory printed at startup stays stopped.
+This is not a permanent deployment mechanism or a replacement for legacy CI/CD.
