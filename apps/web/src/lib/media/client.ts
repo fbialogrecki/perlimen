@@ -53,12 +53,6 @@ export async function uploadMediaAsset(request: Request): Promise<Response> {
     cache: "no-store",
     redirect: process.env.PERLIMEN_LITE_API_PORT === undefined ? undefined : "error",
   } as RequestInit & { duplex: "half" })
-  if (process.env.PERLIMEN_LITE_API_PORT !== undefined && response.status === 201) {
-    const asset = await response.json()
-    return typeof asset?.id === "string"
-      ? Response.json({ id: asset.id }, { status: 201 })
-      : Response.json({ error: "invalid upload response" }, { status: 502 })
-  }
   return new Response(response.body, {
     status: response.status,
     headers: { "content-type": response.headers.get("content-type") ?? "application/json" },

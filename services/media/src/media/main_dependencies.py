@@ -1,5 +1,7 @@
 from collections.abc import Generator
+from typing import Annotated
 
+from fastapi import Depends
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -29,6 +31,12 @@ def get_object_storage() -> ObjectStorage:
     if _storage is None:
         _storage = S3ObjectStorage(settings)
     return _storage
+
+
+def get_upload_storage(
+    storage: Annotated[ObjectStorage, Depends(get_object_storage)],
+) -> ObjectStorage:
+    return storage
 
 
 def override_object_storage(storage: ObjectStorage | None) -> None:

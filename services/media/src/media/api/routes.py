@@ -17,7 +17,7 @@ from media.api.schemas import (
 from media.api.security import require_internal_token, require_user_id
 from media.domain.models import AccountErasureTombstone, MediaAsset, MediaDerivative
 from media.images import InvalidImageError, process_image
-from media.main_dependencies import get_object_storage, get_session, settings
+from media.main_dependencies import get_object_storage, get_session, get_upload_storage, settings
 from media.storage import ObjectStorage
 from media.uploads import parse_multipart_upload, stream_request_to_file, validate_content_length
 from sqlalchemy import select, text
@@ -149,7 +149,7 @@ async def upload_asset(
     request: Request,
     owner_user_id: Annotated[str, Depends(require_user_id)],
     session: Annotated[Session, Depends(get_session)],
-    storage: Annotated[ObjectStorage, Depends(get_object_storage)],
+    storage: Annotated[ObjectStorage, Depends(get_upload_storage)],
 ) -> MediaAsset:
     validate_content_length(request, settings.max_upload_bytes)
     with TemporaryDirectory(dir=settings.upload_temp_dir, prefix="media-upload-") as temp_dir:

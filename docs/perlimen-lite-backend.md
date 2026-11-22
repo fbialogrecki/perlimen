@@ -59,12 +59,14 @@ root and does not follow blob symlinks. PostgreSQL holds the owner, context, key
 backup/restore needs both the database and media directory. No S3 service, credentials or
 media worker are needed. Standalone media still uses S3.
 
-The browser gets an asset ID after upload. Through the BFF, owners can preview derivatives;
-other signed-in users can read visible post images unless either user blocked the other.
+Upload returns the existing asset and derivative metadata; the bucket is the logical label
+`lite-local` and object keys never expose host paths. Through the BFF, owners can preview
+derivatives; other signed-in users can read visible post images unless either user blocked the other.
 Only avatars linked to public profiles or Pages and posters linked to non-deleted public
 events can be read anonymously. Originals are never served in Lite; all reads use `no-store`.
-The media-owned erasure stage revokes access, then removes originals and derivatives before
-dropping the inventory. A storage failure retains the inventory for retry.
+The media-owned erasure stage commits the owner tombstone before attempting file deletion,
+then removes originals and derivatives before dropping the inventory. If the directory is
+unavailable, the tombstone still revokes access and fences writes; the inventory stays for retry.
 
 ## Verify
 

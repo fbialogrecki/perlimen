@@ -95,12 +95,14 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Perlimen Lite", lifespan=lifespan)
     app.add_exception_handler(SessionAuthenticationError, session_authentication_error)
 
-    def local_storage() -> LocalMediaStorage:
+    def local_upload_storage() -> LocalMediaStorage:
         if not storage.ready():
             raise HTTPException(status_code=503, detail="private media directory is not ready")
         return storage
 
-    app.dependency_overrides[media.get_object_storage] = local_storage
+    # Erasure resolves the adapter without I/O so it can commit the fence first.
+    app.dependency_overrides[media.get_object_storage] = lambda: storage
+    app.dependency_overrides[media.get_upload_storage] = local_upload_storage
     app.include_router(
         media_access_router(factories, storage),
         prefix="/media",

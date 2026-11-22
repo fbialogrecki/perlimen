@@ -233,8 +233,8 @@ name (namespace, env var prefix, headers, cookies, buckets). See `docs/rebrandin
 - Images are served same-origin through `/api/media/assets/[...path]`. In Lite, reads are
   uncached and never serve originals: owners can preview, visible post attachments require
   an unblocked session, and linked public avatars and event posters remain anonymous-readable.
-- Lite writes private local blobs without S3. Upload success returns the asset ID without
-  exposing storage metadata to the browser; internal erasure deletes originals and derivatives.
+- Lite writes private local blobs without S3. Upload success retains the asset and derivative
+  metadata with logical keys, never host paths; internal erasure deletes originals and derivatives.
 
 ### 3.9 Notifications
 

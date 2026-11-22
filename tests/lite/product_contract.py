@@ -466,8 +466,38 @@ class ProductContract(unittest.TestCase):
         self.upload(anon, "post_image", status=401)
         self.upload(owner, "post_image", status=422, mime="image/jpeg")
         payload = self.upload(owner, "post_image").json()
-        self.assertEqual(set(payload), {"id"})
+        self.assertEqual(
+            set(payload),
+            {
+                "id",
+                "owner_user_id",
+                "context",
+                "bucket",
+                "original_key",
+                "content_type",
+                "size_bytes",
+                "checksum_sha256",
+                "status",
+                "derivatives",
+            },
+        )
         asset = payload["id"]
+        self.assertEqual(payload["context"], "post_image")
+        self.assertEqual(payload["content_type"], "image/png")
+        self.assertGreater(payload["size_bytes"], 0)
+        self.assertEqual(payload["status"], "ready")
+        self.assertEqual(payload["bucket"], "lite-local")
+        self.assertEqual(payload["original_key"], f"assets/{asset}/original")
+        derivatives = payload["derivatives"]
+        self.assertCountEqual([item["variant"] for item in derivatives], ["post_480", "post_1280"])
+        for item in derivatives:
+            self.assertEqual(
+                set(item),
+                {"variant", "object_key", "content_type", "width", "height", "size_bytes"},
+            )
+            self.assertEqual(item["object_key"], f"assets/{asset}/{item['variant']}.webp")
+            self.assertEqual(item["content_type"], "image/webp")
+            self.assertGreater(item["size_bytes"], 0)
         private = f"{UPLOAD}/assets/{asset}"
         thumbnail = f"{private}/post_480.webp"
         denied = (401, 403, 404)

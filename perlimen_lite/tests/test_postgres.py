@@ -3,12 +3,14 @@
 import os
 import subprocess
 import sys
+from io import BytesIO
 from pathlib import Path
 
 import psycopg
 import pytest
 from alembic.script import ScriptDirectory
 from fastapi.testclient import TestClient
+from media.domain.models import AccountErasureTombstone, MediaAsset, MediaDerivative
 from perlimen_lite.database import (
     BOOTSTRAP,
     DATABASE,
@@ -19,8 +21,10 @@ from perlimen_lite.database import (
     required,
     role,
 )
-from sqlalchemy import Connection
+from PIL import Image
+from sqlalchemy import Connection, select
 from sqlalchemy.exc import ProgrammingError
+from sqlalchemy.orm import Session
 
 TABLES = {
     "users": "application_users",
@@ -34,6 +38,52 @@ def assert_denied(conn: Connection, statement: str) -> None:
     with pytest.raises(ProgrammingError) as exc, conn.begin_nested():
         conn.exec_driver_sql(statement)
     assert isinstance(exc.value.orig, psycopg.errors.InsufficientPrivilege)
+
+
+def assert_media_erasure_retry(client: TestClient, root: Path) -> None:
+    png = BytesIO()
+    Image.new("RGB", (32, 24)).save(png, "PNG")
+    owner = "synthetic-media-owner"
+
+    def upload() -> int:
+        return client.post(
+            "/media/v1/assets/upload",
+            data={"context": "post_image"},
+            files={"file": ("fixture.png", png.getvalue(), "image/png")},
+            headers={"X-Threshold-User-Id": owner},
+        ).status_code
+
+    path = "/media/internal/v1/account-erasure"
+    assert upload() == 201
+    blobs = set(root.iterdir())
+    assert len(blobs) == 3 and all(blob.is_file() for blob in blobs)
+
+    engine = engine_for(endpoint(), "media", "runtime")
+    try:
+        root.chmod(0o755)
+        try:
+            assert upload() == 503
+            assert client.post(path, json={"user_id": owner}).status_code == 503
+        finally:
+            root.chmod(0o700)
+
+        with Session(engine) as session:
+            assert session.get(AccountErasureTombstone, owner) is not None
+            assert len(list(session.scalars(select(MediaAsset)))) == 1
+            assert len(list(session.scalars(select(MediaDerivative)))) == 2
+        assert set(root.iterdir()) == blobs
+        assert client.get("/readyz").status_code == 200
+        assert upload() == 409
+
+        for _ in range(2):
+            assert client.post(path, json={"user_id": owner}).status_code == 200
+        assert not list(root.iterdir())
+        with Session(engine) as session:
+            assert session.get(AccountErasureTombstone, owner) is not None
+            assert session.scalar(select(MediaAsset)) is None
+            assert session.scalar(select(MediaDerivative)) is None
+    finally:
+        engine.dispose()
 
 
 @pytest.mark.skipif(
@@ -146,6 +196,7 @@ def test_migrate_and_serve_fresh_postgres(tmp_path: Path, monkeypatch: pytest.Mo
         assert client.get("/events/v1/events").status_code == 200
         asset = client.get("/media/internal/v1/assets/test-missing-asset")
         assert asset.status_code == 404 and asset.json()["detail"] == "asset not found"
+        assert_media_erasure_retry(client, root)
         auth = client.get("/users/v1/auth/me", headers={"X-Threshold-User-Id": "forged"})
         assert auth.status_code == 401 and len(auth.headers.get_list("set-cookie")) == 2
         auth_path = "/users/v1/auth"
