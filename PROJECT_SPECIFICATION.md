@@ -369,9 +369,9 @@ See [Perlimen Lite backend](docs/perlimen-lite-backend.md) for the local configu
 | NATS pub/sub | `users.block.changed.v1` (users → social) |
 | HTTP `/internal/v1/*` with `X-Threshold-Internal-Token` | Everything else: Page roles and artist lookups (events → users), notifications and mention lookups, event announcements (events → social), account erasure (users → social/events/media), media asset validation |
 
-The BFF calls `social`, `events` and `media` over HTTP with the internal token and, for a
-signed-in viewer, `X-Threshold-User-Id` / `X-Threshold-Username` headers of the resolved
-session user. It calls `users` `/v1/*` with the session cookie.
+The BFF sends `social`, `events` and `media` the internal token and session-derived identity
+(`X-Threshold-User-Id` / `X-Threshold-Username`). Product auth uses session cookies; in Lite
+the BFF also sends the internal token to the pinned loopback `/users` endpoint without redirects.
 
 ### 6.3 Build, publication and deployment
 
@@ -391,7 +391,7 @@ session user. It calls `users` `/v1/*` with the session cookie.
 - Browsers never hold internal tokens, S3 credentials, bucket names or raw object keys.
 - `social`, `events` and `media` require `X-Threshold-Internal-Token` on every route
   (constant-time compare; 503 when unconfigured) and trust user headers only after it.
-  `users` requires it on `/internal/v1/*`; its `/v1/*` routes authenticate by session cookie.
+  Standalone `users` requires it on `/internal/v1/*`; Lite also requires it on `/users/v1/*`.
 - BFF mutation routes reject cross-origin requests by `Origin` (`apps/web/src/lib/http/guard.ts`).
 - The web proxy (`apps/web/src/proxy.ts`) sets CSP (`default-src 'self'`, no frames,
   `object-src 'none'`), `X-Content-Type-Options`, `X-Frame-Options: DENY`, `Referrer-Policy`,
