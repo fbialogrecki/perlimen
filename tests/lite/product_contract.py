@@ -337,9 +337,29 @@ class ProductContract(unittest.TestCase):
             self.assertEqual(cookies[name]["path"], path)
 
     def test_session_rotation_origin_and_revocation(self) -> None:
-        self.account("viewer")
+        owner = self.account("viewer")
+        owner_id = self.call(owner, "GET", "/api/me", 200).json()["user"]["id"]
         payload = {"emailOrUsername": self.username("viewer"), "password": self.password}
         client = self.client()
+        asserted_identity = {
+            "X-Threshold-User-Id": owner_id,
+            "X-Threshold-Username": self.username("viewer"),
+            "X-Authentik-Username": self.username("viewer"),
+        }
+        self.call(client, "GET", "/api/me", 401, headers=asserted_identity)
+        self.call(client, "GET", FEED, 401, headers=asserted_identity)
+        self.call(
+            client,
+            "POST",
+            "/api/pages",
+            401,
+            headers=asserted_identity,
+            json={
+                "slug": "unauthenticated",
+                "display_name": "Unauthenticated",
+                "page_type": "club",
+            },
+        )
         self.call(
             client,
             "POST",
@@ -355,6 +375,9 @@ class ProductContract(unittest.TestCase):
             self.username("viewer"),
         )
         self.assertNotIn(REFRESH, client.build_request("GET", "/api/me").headers.get("cookie", ""))
+        self.assertNotIn(
+            REFRESH, client.build_request("POST", "/api/authentication").headers.get("cookie", "")
+        )
         prior = dict(client.cookies)
         self.assert_session_cookies(self.call(client, "POST", "/api/auth/refresh", 200))
         self.assertTrue(

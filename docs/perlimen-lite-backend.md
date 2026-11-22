@@ -43,9 +43,9 @@ under `/users`, `/social`, `/events`, and `/media`. The Lite listener expects th
 internal token even on `/users`; this supplements, not replaces, product sessions
 and each router's own authorization. Do not expose the listener to browsers.
 Lite sets and clears `threshold_refresh` at `/users/v1/auth`; standalone users
-uses `/v1/auth`. The BFF must keep its browser-facing refresh cookie at `/api/auth`.
+uses `/v1/auth`. The BFF translates both paths to `/api/auth`, including clearing.
 
-This backend slice does not switch the BFF or forward requests to legacy services.
+The Lite launcher connects the BFF directly to the private listener, not to legacy services.
 Cross-domain operations that require transport replacement are not integrated;
 legacy outbound URLs/NATS are disabled in this process, and blob routes fail closed
 until local storage is wired. The existing users erasure worker is registered with

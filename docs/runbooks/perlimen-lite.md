@@ -45,7 +45,11 @@ would otherwise load and does not inherit legacy service configuration. It does
 not enable remote email, telemetry or object storage. The launcher sets
 `PERLIMEN_LITE_API_PORT` for the BFF so product-auth requests send the internal
 token only to `http://127.0.0.1:<port>/users` and never follow redirects. The
-standalone users service does not use this mode.
+standalone users service does not use this mode. The launcher sets `NEXTAUTH_URL`
+to the loopback web origin for the exact Origin check and absolute Open Graph
+image URLs. This variable does not enable Authentik or any other login provider.
+The default launch leaves SMTP disabled: verify mail delivery separately against
+a disposable instance with a loopback-only SMTP sink.
 
 On a **fresh disposable checkout** containing both changes, run
 `bash ops/tests/lite-smoke.sh --disposable` (requires `python3`). It checks

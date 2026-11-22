@@ -5,7 +5,7 @@ import { getSession } from "@/lib/auth/session"
 /**
  * Rejects cross-origin mutations (lightweight CSRF guard for BFF route
  * handlers). Browsers send Origin on POST/PUT/DELETE; we require it to match
- * the request host.
+ * the configured Lite web origin or, in standalone mode, the request host.
  */
 export async function assertSameOrigin(request: Request): Promise<boolean> {
   const origin = request.headers.get("origin")
@@ -13,6 +13,10 @@ export async function assertSameOrigin(request: Request): Promise<boolean> {
     // No Origin header: treat as same-origin only for navigations, but our
     // mutations always run from fetch() which sets Origin, so be strict.
     return false
+  }
+
+  if (process.env.PERLIMEN_LITE_API_PORT !== undefined) {
+    return origin === process.env.NEXTAUTH_URL
   }
 
   const headerStore = await headers()

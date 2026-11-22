@@ -6,6 +6,7 @@
 
 export const SESSION_COOKIE = "threshold_session"
 export const REFRESH_COOKIE = "threshold_refresh"
+export const BFF_REFRESH_PATH = "/api/auth"
 
 type ParsedSetCookie = {
   name: string
@@ -46,16 +47,6 @@ function parseSetCookie(raw: string): ParsedSetCookie | null {
   return { name, value, path, maxAge, expires }
 }
 
-/**
- * The backend scopes the refresh cookie to Path=/v1/auth, but the browser only
- * ever talks to the same-origin BFF whose refresh endpoint is /api/auth/refresh.
- * Re-scope it so the browser actually sends the refresh cookie there.
- */
-function rewritePath(path: string): string {
-  if (path === "/v1/auth" || path.startsWith("/v1/auth")) return "/api/auth"
-  return path
-}
-
 function isDeletion(parsed: ParsedSetCookie): boolean {
   return (
     parsed.value === "" ||
@@ -87,7 +78,10 @@ export function planAuthCookieMutations(
   for (const raw of setCookieHeaders) {
     const parsed = parseSetCookie(raw)
     if (!parsed) continue
-    const path = rewritePath(parsed.path)
+    const path = parsed.name === REFRESH_COOKIE &&
+      (parsed.path === "/v1/auth" || parsed.path === "/users/v1/auth")
+      ? BFF_REFRESH_PATH
+      : parsed.path
 
     if (isDeletion(parsed)) {
       mutations.push({

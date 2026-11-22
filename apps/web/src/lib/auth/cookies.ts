@@ -4,6 +4,7 @@ import { cookies } from "next/headers"
 
 import { resolveCookieSecurity } from "@/lib/auth/cookie-security"
 import {
+  BFF_REFRESH_PATH,
   planAuthCookieMutations,
   REFRESH_COOKIE,
   SESSION_COOKIE,
@@ -47,7 +48,7 @@ export async function clearAuthCookies(): Promise<void> {
     maxAge: 0,
   })
   store.set(REFRESH_COOKIE, "", {
-    path: "/api/auth",
+    path: BFF_REFRESH_PATH,
     httpOnly: true,
     secure: cookieSecure(),
     sameSite: "lax",
