@@ -394,12 +394,12 @@ the BFF also sends the internal token to the pinned loopback `/users` endpoint w
 
 - GitHub Actions `ci.yml` runs on pull requests and pushes to `main`; job `ci-ok` aggregates
   `changes`, `security`, `infra`, `containers`, `python` and `web`.
-- Woodpecker `deploy.yml` runs on pushes to `main` that touch application or build inputs
-  (`services/**`, `libs/py/**`, `apps/web/**`, lockfiles, Dockerfile inputs, the pipeline
-  files). It waits for `ci-ok` on the exact SHA, builds and pushes all six images to Harbor
-  tagged with the full SHA, and opens an auto-merging digest-only PR against `infra/`.
-  Argo CD deploys after it merges. Docs-only and `infra/`-only pushes do not publish images.
-- Rollback is reverting the digest PR; migrations are not reverted automatically.
+- `deploy.yml` publishes on application/build-input pushes to `main`, not docs/`infra/` pushes.
+  After exact-SHA `ci-ok`, Woodpecker tags six Harbor images with that SHA and opens a digest PR.
+  Argo CD deploys on auto-merge. Reverting the digest PR does not reverse migrations.
+- The opt-in Lite timer trials the CI-green main tip in a separate checkout and a private network
+  namespace with only Web, API and PostgreSQL forwarded on host loopback. After readiness it rechecks
+  the same CI proof, then main; failed trials retain the healthy checkout and synthetic store.
 
 ---
 

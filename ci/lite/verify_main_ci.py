@@ -25,9 +25,7 @@ def fetch(path: str) -> dict[str, Any]:
     return payload
 
 
-def verify(sha: str) -> tuple[int, int, int]:
-    if not re.fullmatch(r"[0-9a-f]{40}", sha):
-        raise ValueError("expected a full lowercase commit SHA")
+def _latest_green_run(sha: str) -> tuple[int, int]:
     result = fetch(f"workflows/ci.yml/runs?event=push&branch=main&head_sha={sha}&per_page=100")
     runs = result["workflow_runs"]
     if not runs or len(runs) != result["total_count"]:
@@ -47,6 +45,13 @@ def verify(sha: str) -> tuple[int, int, int]:
     run_id, attempt = run["id"], run["run_attempt"]
     if type(run_id) is not int or type(attempt) is not int or min(run_id, attempt) < 1:
         raise ValueError("invalid CI run or attempt ID")
+    return run_id, attempt
+
+
+def verify(sha: str) -> tuple[int, int, int]:
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise ValueError("expected a full lowercase commit SHA")
+    run_id, attempt = _latest_green_run(sha)
     result = fetch(f"runs/{run_id}/attempts/{attempt}/jobs?per_page=100")
     jobs = result["jobs"]
     gates = [job for job in jobs if job["name"] == "ci-ok"]
@@ -62,6 +67,9 @@ def verify(sha: str) -> tuple[int, int, int]:
         or gate["conclusion"] != "success"
     ):
         raise ValueError("ci-ok did not pass on this SHA in the current run attempt")
+    # Historical attempt jobs can still be green after a rerun starts.
+    if _latest_green_run(sha) != (run_id, attempt):
+        raise ValueError("newest CI run or attempt changed during ci-ok lookup")
     return run_id, attempt, gate["id"]
 
 

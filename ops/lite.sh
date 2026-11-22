@@ -41,9 +41,14 @@ case ${1:-} in
 esac
 
 # Do not inherit service URLs, telemetry, credentials, dotenv loaders or proxy settings.
+isolated=${6:-}
+if [[ $isolated == isolated ]]; then
+    [[ $EUID == 0 && ${_CONTAINERS_USERNS_CONFIGURED:-} == done ]] || fail 'Missing rootless namespace.'
+fi
 while IFS= read -r name; do
     case $name in
         HOME|USER|LOGNAME|PATH|LANG|XDG_RUNTIME_DIR|DBUS_SESSION_BUS_ADDRESS|NOTIFY_SOCKET|STATE_DIRECTORY|RUNTIME_DIRECTORY) ;;
+        _CONTAINERS_USERNS_CONFIGURED) [[ $isolated == isolated ]] || unset "$name" ;;
         *) unset "$name" ;;
     esac
 done < <(compgen -e)
@@ -93,12 +98,21 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 0' TERM INT
 
-"${pg[@]}" run --rm --name postgres --cgroups=disabled --sdnotify=ignore --network=pasta \
-    --publish "$host:$pg_port:5432" --http-proxy=false \
+pg_network=(--network=pasta --publish "$host:$pg_port:5432")
+pg_args=()
+pg_inside_port=5432
+if [[ $isolated == isolated ]]; then
+    # Here "host" is the controller's private network namespace, never the real host.
+    pg_network=(--network=host)
+    pg_args=(-c "listen_addresses=$host" -p "$pg_port")
+    pg_inside_port=$pg_port
+fi
+"${pg[@]}" run --rm --name postgres --cgroups=disabled --sdnotify=ignore "${pg_network[@]}" \
+    --http-proxy=false \
     --volume pgdata:/var/lib/postgresql/data \
     --volume "$STATE_DIRECTORY/pg-password:/run/pg-password:ro,Z" \
     --env POSTGRES_PASSWORD_FILE=/run/pg-password --env POSTGRES_USER=lite_bootstrap \
-    --env POSTGRES_DB=perlimen_lite docker.io/library/postgres:17-alpine &
+    --env POSTGRES_DB=perlimen_lite docker.io/library/postgres:17-alpine "${pg_args[@]}" &
 pg_pid=$!
 
 await() {
@@ -110,7 +124,8 @@ await() {
     done
     kill -0 "$pid" 2>/dev/null || fail "$stage exited during startup."
 }
-await PostgreSQL "$pg_pid" 90 "${pg[@]}" exec postgres pg_isready -h "$host" -U lite_bootstrap -d perlimen_lite
+await PostgreSQL "$pg_pid" 90 "${pg[@]}" exec postgres pg_isready -h "$host" -p "$pg_inside_port" \
+    -U lite_bootstrap -d perlimen_lite
 
 api_env() {
     local variable

@@ -1,11 +1,15 @@
 import importlib.util
+import runpy
+import subprocess
+import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
-spec = importlib.util.spec_from_file_location(
-    "lite_main_ci", Path(__file__).resolve().parents[2] / "ci/lite/verify_main_ci.py"
-)
+import pytest
+
+LITE_CI = Path(__file__).resolve().parents[2] / "ci/lite"
+spec = importlib.util.spec_from_file_location("lite_main_ci", LITE_CI / "verify_main_ci.py")
 assert spec is not None and spec.loader is not None
 gate = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gate)
@@ -48,9 +52,9 @@ def jobs(*items):
 
 class MainCIGateTest(unittest.TestCase):
     def test_accepts_exact_main_sha_on_latest_attempt(self):
-        with patch.object(gate, "fetch", side_effect=[runs(RUN), jobs(JOB)]) as fetch:
+        with patch.object(gate, "fetch", side_effect=[runs(RUN), jobs(JOB), runs(RUN)]) as fetch:
             self.assertEqual(gate.verify(SHA), (123, 2, 456))
-            self.assertEqual([call.args[0] for call in fetch.call_args_list], [RUNS, JOBS])
+            self.assertEqual(fetch.call_args_list, [call(RUNS), call(JOBS), call(RUNS)])
 
     def test_rejects_non_main_or_unsuccessful_runs(self):
         for change in (
@@ -110,3 +114,65 @@ class MainCIGateTest(unittest.TestCase):
         with patch.object(gate, "fetch") as fetch, self.assertRaises(ValueError):
             gate.verify("77f3fe")
         fetch.assert_not_called()
+
+
+@pytest.mark.parametrize("has_baseline", [False, True])
+@pytest.mark.parametrize(
+    "final_runs",
+    [
+        pytest.param(
+            runs(RUN | {"run_attempt": 3, "status": "in_progress", "conclusion": None}),
+            id="rerun-started",
+        ),
+        pytest.param(runs(RUN | {"run_attempt": 3}), id="new-green-attempt"),
+        pytest.param(runs(RUN, RUN | {"id": 124, "run_number": 11}), id="new-green-run"),
+        pytest.param(runs(RUN) | {"total_count": 2}, id="incomplete"),
+        pytest.param(TimeoutError("API unavailable"), id="unavailable"),
+    ],
+)
+def test_failed_run_recheck_after_candidate_readiness_recovers(
+    tmp_path, capsys, has_baseline, final_runs
+):
+    target = runpy.run_path(str(LITE_CI / "pull_main.py"))["Target"](tmp_path)
+    state = target.load()
+    if has_baseline:
+        prior_sha = "b" * 40
+        state["current"] = {"sha": prior_sha, "checkout": f"{prior_sha}-test", "ci": "prior proof"}
+        target.save(state)
+    before = target.load()
+    release = {
+        "sha": SHA,
+        "checkout": f"{SHA}-test",
+        "ci": f"ci-ok passed: sha={SHA} run=123 attempt=2 job=456",
+    }
+
+    def run_verifier(args, **_kwargs):
+        # Exercise the real CLI without spawning a process or making real API calls.
+        with patch.object(sys, "argv", args[2:]):
+            code = gate.main()
+        if code:
+            raise subprocess.CalledProcessError(code, args)
+        return capsys.readouterr().out
+
+    with (
+        patch.object(gate, "fetch", side_effect=[runs(RUN), jobs(JOB), final_runs]) as fetch,
+        patch.object(subprocess, "check_output", side_effect=run_verifier),
+        patch.object(target, "activate") as activate,
+        patch.object(target, "live", side_effect=RuntimeError("prior release not running")),
+        patch.object(target, "stop") as stop,
+        patch.object(target, "main_matches", return_value=True) as main_matches,
+        pytest.raises(subprocess.CalledProcessError),
+    ):
+        target.replace(state, release)
+
+    assert fetch.call_args_list == [call(RUNS), call(JOBS), call(RUNS)]
+    main_matches.assert_not_called()
+    expected_starts = [call(release, "candidate verified")]
+    if has_baseline:
+        expected_starts.append(call(before["current"], "recovered"))
+        stop.assert_not_called()
+    else:
+        stop.assert_called_once_with()
+    assert activate.call_args_list == expected_starts
+    assert state == target.load() == before
+    assert not capsys.readouterr().out

@@ -125,6 +125,115 @@ through the web BFF at every stage. It stops the transient unit and removes the
 checkout; the private synthetic state directory printed at startup stays stopped.
 This is not a permanent deployment mechanism or a replacement for legacy CI/CD.
 
+## Automatic Lite deployment (dedicated NUC account)
+
+The optional user timer polls the public Perlimen repository every five minutes.
+It considers only the observed `main` tip, then requires the existing GitHub
+Actions workflow's successful **main-push** `ci-ok` for that exact SHA and run
+attempt, which includes the security scans. After reading the exact attempt's
+jobs, the verifier reads the latest exact main-push run again and requires the
+same run and attempt to still be green. After readiness the controller requires
+the same successful proof as before the trial, then rechecks the `main` tip.
+A green PR, changed proof or tip, or unreadable response cannot authorize
+promotion. Intermediate pushes can be superseded. No new workflow, webhook,
+runner, or deployment credential is needed; Woodpecker, Harbor and Argo CD are
+unchanged.
+
+### Coordinator setup
+
+- Use a dedicated, unprivileged account with private home, its own rootless
+  Podman/subuid/subgid configuration, and the dependencies listed above. Do not
+  grant sudo, k3s or legacy access, or install SSH/GitHub keys, registry secrets,
+  a credential helper or a shared service socket. The user manager needs to stay
+  up across logouts and reboots; the host operator can enable lingering for
+  this account. The host needs outbound access for public GitHub and the locked
+  dependency/image downloads, but no public or LAN listener or tunnel.
+- Reserve **13300 (Web), 13800 (API), 15432 (PostgreSQL)** on loopback. Verify all
+  three are free before first start. Use only synthetic data. Do not reuse any
+  existing checkout, credentials, database or media directories.
+- The automatic target requires rootless Linux user/network namespaces,
+  `unshare`, `nsenter`, and `pasta` with `--host-lo-to-ns-lo` support. The
+  installed controller creates a new network namespace before the checkout's
+  install or launch commands run. Only the three TCP ports are forwarded to
+  host IPv4 loopback; automatic forwards are disabled. Startup fails without
+  this boundary. The network namespace is not a sandbox for untrusted code.
+- Stage the following four files from a reviewed, successfully checked **merged
+  main** revision. Run these commands as the dedicated account from the staged
+  tree. Install trusted control files outside the managed checkout and update
+  them only from another reviewed merged revision while intake is stopped.
+
+```bash
+install -d -m 0700 "$HOME/.local/lib/perlimen-lite-pull" "$HOME/.config/systemd/user"
+install -m 0600 ci/lite/{pull_main,verify_main_ci}.py "$HOME/.local/lib/perlimen-lite-pull/"
+install -m 0600 ops/systemd/perlimen-lite-pull.{service,timer} "$HOME/.config/systemd/user/"
+systemctl --user daemon-reload
+systemctl --user enable --now perlimen-lite-pull.timer
+systemctl --user list-timers perlimen-lite-pull.timer
+journalctl --user -u perlimen-lite-pull.service -e
+```
+
+On first eligible poll the controller creates a checkout and fresh Lite store.
+Each candidate gets a separate checkout; the recorded current and previous
+checkouts remain available for recovery. The service keeps the same private
+PostgreSQL/media store across switches. No two polls or rollbacks run concurrently.
+`release.json` records current/previous checkout, SHA and CI evidence. After
+checking the namespace, listener PIDs, running checkout, Web `/` and API `/readyz`,
+the controller revalidates the CI proof and finally reads remote `main` before
+promoting. Changed or unavailable proof or tip restores the last healthy release
+(or stops the first trial) without promotion, blocking the candidate SHA, or
+setting a hold. Synthetic BFF login is a separate operator acceptance check.
+
+### Verify, roll back and stop
+
+Use the same dedicated account and systemd user environment (commands in Bash):
+
+```bash
+ctl="$HOME/.local/lib/perlimen-lite-pull/pull_main.py"
+state="$(systemd-path user-state-private)/perlimen-lite-pull"
+python3 -I "$ctl" --state "$state" status
+python3 -I "$ctl" --state "$state" rollback
+python3 -I "$ctl" --state "$state" status
+```
+
+`rollback` takes the previous recorded healthy SHA, rechecks compatibility and
+holds automatic promotion **before** the switch. `status` must report that SHA
+in both the record and the live check; verify the same synthetic account still
+works. On first deployment there is no previous SHA. If a candidate fails health
+or is interrupted, the prior committed release remains authoritative; the next
+poll restores it if necessary without consulting GitHub. A confirmed activation
+failure blocks that SHA; an interrupted trial or a failed remote recheck can be retried.
+Recovery still needs the installed toolchain, dependency cache and
+local PostgreSQL image (or access to download missing artifacts).
+A rollback hold survives restarts; it still lets the timer restore the held
+release. After triage, lift the hold with:
+
+```bash
+python3 -I "$ctl" --state "$state" resume
+```
+
+The next poll may redeploy the same `main` tip if it is still eligible and was
+rolled back manually rather than blocked by a failed activation. To take this
+target offline, disable the timer, stop any active poll, then stop the Lite
+unit through the controller:
+
+```bash
+systemctl --user disable --now perlimen-lite-pull.timer
+systemctl --user stop perlimen-lite-pull.service
+python3 -I "$ctl" --state "$state" stop
+```
+
+The stop keeps the release record, checkouts, and target-specific Lite data and
+credentials. The controller never resets or deletes an inactive checkout. After
+stopping the target, inspect inactive worktrees under `releases/` before pruning
+them; retain the current and previous worktrees from `release.json`. There is
+brief downtime during a switch; this is a single loopback target, not a
+production Next build, sandbox for untrusted code, or high-availability service.
+Migration/schema inputs, launcher and lock/dependency inputs must match the
+known release in both directions. A change to those inputs needs separate
+qualification on a fresh isolated target; never force a switch, downgrade the
+DB, or delete the existing store. Application data is not restored to a point in
+time by a code rollback.
+
 ## Paired backup and restore rehearsal
 
 Use two dedicated loopback-only Lite PostgreSQL 17 instances, separate volumes,
