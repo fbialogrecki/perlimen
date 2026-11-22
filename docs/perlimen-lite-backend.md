@@ -26,7 +26,7 @@ rotate passwords. Invoke these commands in their respective environments:
 
 ```sh
 .venv/bin/python -m perlimen_lite.migrate
-.venv/bin/python -m uvicorn perlimen_lite.main:app --host 127.0.0.1 --port 8000
+.venv/bin/python -m perlimen_lite.serve 8000
 ```
 
 The migrator provisions schemas and roles under a PostgreSQL advisory lock, then

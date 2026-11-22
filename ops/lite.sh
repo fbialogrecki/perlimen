@@ -128,7 +128,7 @@ wait "$migration_pid" || fail 'Local migrations failed.'
 migration_pid=
 (
     api_env THRESHOLD_AUTH_PASSWORD_PEPPER_CURRENT THRESHOLD_AUTH_SESSION_TOKEN_HMAC_KEY
-    exec uv run --frozen --no-dev --python 3.13 python -m uvicorn perlimen_lite.main:app --host "$host" --port "$api_port" --no-proxy-headers
+    exec uv run --frozen --no-dev --python 3.13 python -m perlimen_lite.serve "$api_port"
 ) &
 api_pid=$!
 http=(curl -q --noproxy '*' --fail --silent --max-time 3)
@@ -140,8 +140,11 @@ await API "$api_pid" 45 "${http[@]}" "$api_url/readyz"
     export USERS_SERVICE_URL="$api_url/users" SOCIAL_SERVICE_URL="$api_url/social"
     export EVENTS_SERVICE_URL="$api_url/events" MEDIA_SERVICE_URL="$api_url/media"
     export PERLIMEN_LITE_API_PORT="$api_port"
+    export PERLIMEN_LITE_BFF_LOG="$RUNTIME_DIRECTORY/bff.jsonl"
+    : > "$PERLIMEN_LITE_BFF_LOG"
     export NODE_ENV=development NEXT_TELEMETRY_DISABLED=1 AUTH_COOKIE_SECURE=true WEB_TRUSTED_LAN_HTTP=false
-    exec bun ./node_modules/next/dist/bin/next dev --hostname "$host" --port "$web_port"
+    # Next development output can include URLs, fetch details and raw errors.
+    exec bun ./node_modules/next/dist/bin/next dev --hostname "$host" --port "$web_port" >/dev/null 2>&1
 ) &
 web_pid=$!
 await web "$web_pid" 75 "${http[@]}" "http://$host:$web_port/"

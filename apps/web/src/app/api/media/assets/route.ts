@@ -1,5 +1,6 @@
 import { MediaServiceConfigurationError, uploadMediaAsset } from "@/lib/media/client"
 import { assertSameOrigin } from "@/lib/http/guard"
+import { observeLiteResponse } from "@/lib/http/lite-diagnostics"
 
 export const dynamic = "force-dynamic"
 export const MAX_MEDIA_UPLOAD_BYTES = 10_100_000
@@ -90,5 +91,6 @@ export async function postWithServices(
 }
 
 export async function POST(request: Request) {
+  await observeLiteResponse("/api/media/assets", request.headers)
   return postWithServices(request, defaultServices)
 }

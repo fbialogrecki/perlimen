@@ -27,7 +27,6 @@ from users.api.routes import (
 from events import main_dependencies as events
 from media import main_dependencies as media
 from perlimen_common.health import ok
-from perlimen_common.logging import configure_logging
 from perlimen_lite.database import DOMAINS, endpoint, engine_for, migration_config, required, role
 from social import main_dependencies as social
 from users import main_dependencies as users
@@ -92,7 +91,6 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        configure_logging()
         stop = asyncio.Event()
         try:
             async with asyncio.TaskGroup() as tasks:
