@@ -1,6 +1,7 @@
 """Black-box product contracts against an explicitly disposable local web origin."""
 
 import argparse
+import json
 import secrets
 import ssl
 import time
@@ -45,10 +46,11 @@ def local_origin(value: str) -> str:
 
 
 class Document(HTMLParser):
-    """Read rendered headings, visible text and actual metadata, not RSC script payloads."""
+    """Keep raw HTML separate from rendered text and metadata for privacy checks."""
 
     def __init__(self, html: str) -> None:
         super().__init__()
+        self.html = html
         self.meta: dict[str, str] = {}
         self.headings: list[str] = []
         self.text: list[str] = []
@@ -247,6 +249,7 @@ class ProductContract(unittest.TestCase):
     def test_protected_feed_and_committed_block(self) -> None:
         viewer = self.account("viewer")
         author = self.account("author")
+        unblocked = self.account("organizer")
         anon = self.client()
         viewer_id = self.call(viewer, "GET", "/api/me", 200).json()["user"]["id"]
         self.call(anon, "GET", FEED, 401)
@@ -254,10 +257,14 @@ class ProductContract(unittest.TestCase):
 
         onboarding = self.call(viewer, "POST", "/api/onboarding", 200, json={"city": CITY})
         group = onboarding.json()["city_group"]["slug"]
+        membership = f"/api/social/groups/{group}/membership"
         group_text = f"Group fixture {self.run_id}"
         followed_text = f"Followed fixture {self.run_id}"
+        control_text = f"Unblocked group fixture {self.run_id}"
         group_post = self.post(viewer, group_text, group_slug=group)
         followed_post = self.post(author, followed_text)
+        self.call(unblocked, "POST", membership, 200)
+        control_id = self.post(unblocked, control_text, group_slug=group)["id"]
         landing = self.call(anon, "GET", "/app", (200, 302, 303, 307, 308))
         if landing.status_code == 200:
             self.assertIn("Redirecting", Document(landing.text).rendered)
@@ -266,8 +273,8 @@ class ProductContract(unittest.TestCase):
             self.assertEqual(redirect.path, "/login")
             self.assertEqual(parse_qs(redirect.query).get("callbackUrl"), ["/app"])
         # Include serialized server-component data in the leak check.
-        self.assertNotIn(group_text, landing.text)
-        self.assertNotIn(followed_text, landing.text)
+        for marker in (group_text, followed_text, control_text):
+            self.assertNotIn(marker, landing.text)
 
         def ids() -> list[str]:
             return [p["id"] for p in self.call(viewer, "GET", FEED, 200).json()["items"]]
@@ -293,22 +300,29 @@ class ProductContract(unittest.TestCase):
             self.assertIn(followed_text, html)
 
         # A group post makes the block check independent of follow transport.
-        self.call(author, "POST", f"/api/social/groups/{group}/membership", 200)
+        self.call(author, "POST", membership, 200)
         blocked_text = f"Blocked group fixture {self.run_id}"
         blocked_post = self.post(author, blocked_text, group_slug=group)
-        self.assertIn(blocked_post["id"], ids())
-        self.assertIn(blocked_text, self.document(viewer, "/app").rendered)
+        before = ids()
+        before_app = self.document(viewer, "/app")
+        self.assertIn(control_id, before)
+        self.assertIn(blocked_post["id"], before)
+        self.assertIn(control_text, before_app.rendered)
+        self.assertIn(blocked_text, before_app.rendered)
 
         self.call(viewer, "POST", "/api/blocks", 201, json={"username": self.username("author")})
         after = ids()  # The first read must use the committed policy, without waiting or retries.
         self.assertIn(group_post["id"], after)
+        self.assertIn(control_id, after)
         with self.subTest(contract="first social Feed read after block"):
             self.assertNotIn(blocked_post["id"], after)
             self.assertNotIn(followed_post["id"], after)
-        html = self.document(viewer, "/app").rendered
-        self.assertIn(group_text, html)
-        with self.subTest(contract="first rendered Feed read after block"):
-            self.assertFalse(blocked_text in html or followed_text in html)
+        after_app = self.document(viewer, "/app")
+        self.assertIn(group_text, after_app.rendered)
+        self.assertIn(control_text, after_app.rendered)
+        for marker in (blocked_text, blocked_post["id"], followed_text, followed_post["id"]):
+            with self.subTest(contract="first SSR Feed response after block", marker=marker):
+                self.assertFalse(marker in after_app.html, "SSR exposed a blocked post")
         self.call(author, "GET", f"/posts/{followed_post['id']}", 200)
 
     def assert_session_cookies(self, response: httpx.Response) -> None:
@@ -446,19 +460,23 @@ class ProductContract(unittest.TestCase):
         )
         post = self.post(owner, "Owned asset fixture", media_asset_ids=[asset])
         self.assertEqual(post["media_asset_ids"], [asset])
+        with self.subTest(contract="attachment does not publish a session-gated image"):
+            self.call(anon, "GET", f"{private}/post_480.webp", denied)
         avatar = self.avatar(owner)
-        result = self.call(anon, "GET", avatar, 200)
-        self.assertEqual(result.headers["content-type"], "image/webp")
-        with Image.open(BytesIO(result.content)) as image:
-            self.assertEqual((image.format, image.size), ("WEBP", (256, 256)))
         published = avatar.rsplit("/", 1)[0]
         for variant in ("original", "post_480.webp"):
             with self.subTest(published=variant):
                 self.call(anon, "GET", f"{published}/{variant}", denied)
         doc = self.document(anon, f"/u/{self.username('author')}")
-        self.assertEqual(
-            urlsplit(doc.meta.get("og:image", "")).path, f"{published}/avatar_512.webp"
-        )
+        og_image = doc.meta.get("og:image", "")
+        self.assertEqual(og_image, f"{self.origin}{published}/avatar_512.webp")
+        for path, size in ((avatar, 256), (urlsplit(og_image).path, 512)):
+            with self.subTest(public_image=path):
+                result = self.call(anon, "GET", path, 200)
+                self.assertEqual(result.headers["content-type"], "image/webp")
+                with Image.open(BytesIO(result.content)) as image:
+                    self.assertEqual((image.format, image.size), ("WEBP", (size, size)))
+                    image.load()
 
     def test_account_erasure_revokes_then_removes(self) -> None:
         account = self.account("erase")
@@ -467,7 +485,9 @@ class ProductContract(unittest.TestCase):
         name = self.username("erase")
         profile = f"/u/{name}"
         body = f"Retained thread fixture {self.run_id}"
-        post_id = self.post(account, body)["id"]
+        onboarding = self.call(account, "POST", "/api/onboarding", 200, json={"city": CITY})
+        group = onboarding.json()["city_group"]["slug"]
+        post_id = self.post(account, body, group_slug=group)["id"]
         post_path = f"/posts/{post_id}"
         reply = f"Retained reply fixture {self.run_id}"
         self.call(
@@ -476,10 +496,21 @@ class ProductContract(unittest.TestCase):
         avatar = self.avatar(account)
         self.call(anon, "GET", avatar, 200)
         self.assertIn(name, self.document(anon, profile).headings)
-        original_thread = self.document(observer, post_path).rendered
-        self.assertIn(body, original_thread)
-        self.assertIn(reply, original_thread)
+
+        def retained_post() -> dict[str, Any]:
+            response = self.call(observer, "GET", f"/api/social/groups/{group}/posts", 200)
+            matches = [item for item in response.json()["items"] if item["id"] == post_id]
+            self.assertEqual(len(matches), 1, "erasure must preserve the group post")
+            return cast(dict[str, Any], matches[0])
+
         user_id = self.call(account, "GET", "/api/me", 200).json()["user"]["id"]
+        original_post = retained_post()
+        self.assertEqual(original_post["author_username"], name)
+        self.assertEqual(original_post["author_user_id"], user_id)
+        original_thread = self.document(observer, post_path)
+        self.assertIn(body, original_thread.rendered)
+        self.assertIn(reply, original_thread.rendered)
+        self.assertTrue(profile in original_thread.html, "fixture author profile link is missing")
         replay = self.client()
         replay.cookies.update(account.cookies)
         self.call(account, "DELETE", "/api/me", 202)
@@ -493,13 +524,16 @@ class ProductContract(unittest.TestCase):
                 anon, "GET", profile, (200, 404), headers={"User-Agent": "Googlebot"}
             )
             media_result = self.call(anon, "GET", avatar, (200, 401, 403, 404))
-            thread = self.document(observer, post_path).rendered
-            self.assertIn(body, thread, "erasure must preserve the thread")
-            self.assertIn(reply, thread, "erasure must preserve the other author's reply")
-            anonymized = "Deleted User" in thread or "deleted-user" in thread
+            thread = self.document(observer, post_path)
+            self.assertIn(body, thread.rendered, "erasure must preserve the thread")
+            self.assertIn(reply, thread.rendered, "erasure must preserve the other author's reply")
+            anonymized = "Deleted User" in thread.rendered or "deleted-user" in thread.rendered
             if profile_result.status_code == 404 and media_result.status_code != 200 and anonymized:
-                self.assertNotIn(name, thread)
-                self.assertNotIn(user_id, thread)
+                self.assertFalse(name in thread.html, "permalink retained the erased username")
+                self.assertFalse(user_id in thread.html, "permalink retained the erased user ID")
+                payload = json.dumps(retained_post())
+                self.assertFalse(name in payload, "post payload retained the erased username")
+                self.assertFalse(user_id in payload, "post payload retained the erased user ID")
                 break
             self.assertLess(
                 time.monotonic(),

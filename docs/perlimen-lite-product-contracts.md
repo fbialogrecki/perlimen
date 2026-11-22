@@ -23,14 +23,18 @@ local HTTPS listener using `--origin https://127.0.0.1:<port> --ca-file <ca.pem>
 the client never disables certificate verification. Add a unittest name such as
 `ProductContract.test_session_rotation_origin_and_revocation` to run one case.
 `--erasure-wait` changes the default 30-second convergence window if needed.
+Set the web process's `NEXTAUTH_URL` to the same origin so the profile's Open
+Graph image URL points to the disposable instance.
 
 The suite checks raw anonymous SSR HTML and Open Graph tags; protected `/app`
 and the posts API; login, Origin, cookie scope, rotation and revocation; followed
-and group Feed items and the first read after a block; event roles, assigned
-staff and single-use event-bound QR; upload validation, ownership and visibility;
-and immediate session revocation followed by asynchronous public erasure and
-thread continuity. It doesn't require browser hydration and doesn't prove DB
-lock behavior, restart recovery, physical file deletion or runtime performance.
+and group Feed items and the first API and full HTML reads after a block, with
+an unblocked author as a control; event roles, assigned staff and single-use
+event-bound QR; upload validation, ownership, private attachments and the
+anonymous Open Graph WebP; and immediate session revocation followed by
+asynchronous erasure of identity markers from the retained post payload and
+thread HTML. It doesn't require browser hydration and doesn't prove DB lock
+behavior, restart recovery, physical file deletion or runtime performance.
 Use the owning modules' tests and the Lite integration gates for those checks.
 
 The full suite is a gate for the composed Lite runtime, not the legacy transport:
