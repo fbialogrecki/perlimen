@@ -1,5 +1,6 @@
 import "server-only"
 
+import { correlateLiteCall } from "@/lib/http/lite-diagnostics"
 import { mediaCacheControl } from "@/lib/media/cache"
 import { trustedAuthorHeaders } from "@/lib/social/client"
 
@@ -30,6 +31,7 @@ export async function uploadMediaAsset(request: Request): Promise<Response> {
     "X-Threshold-Internal-Token": internalToken(),
     ...userHeaders,
   })
+  await correlateLiteCall(headers)
   for (const name of ["content-type", "content-length"]) {
     const value = request.headers.get(name)
     if (value !== null) headers.set(name, value)

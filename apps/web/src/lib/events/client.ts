@@ -1,6 +1,7 @@
 import "server-only"
 
 import { assertSameOrigin, requireSession } from "@/lib/http/guard"
+import { correlateLiteCall } from "@/lib/http/lite-diagnostics"
 import { safeLogFailure } from "@/lib/http/safe-log"
 import { trustedAuthorHeaders } from "@/lib/social/client"
 
@@ -45,6 +46,7 @@ export async function eventsCall(
     "X-Threshold-Internal-Token": internalToken(),
     ...(userHeaders ?? {}),
   })
+  await correlateLiteCall(headers)
   let body: string | undefined
   if (options.json !== undefined) {
     headers.set("content-type", "application/json")

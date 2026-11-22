@@ -4,6 +4,7 @@ import { cookies } from "next/headers"
 
 import { REFRESH_COOKIE, SESSION_COOKIE } from "@/lib/auth/cookies"
 import { resolveUsersServiceUrl, UsersServiceConfigurationError } from "@/lib/auth/users-service-url"
+import { correlateLiteCall } from "@/lib/http/lite-diagnostics"
 import type { NotificationPreferences } from "@/lib/notification-preferences"
 
 /**
@@ -45,6 +46,7 @@ async function call(
     const token = process.env.THRESHOLD_INTERNAL_TOKEN
     if (!token) throw new UsersServiceConfigurationError("Lite users service token is not configured")
     headers.set("X-Threshold-Internal-Token", token)
+    await correlateLiteCall(headers)
   }
   let requestBody: string | undefined
 
