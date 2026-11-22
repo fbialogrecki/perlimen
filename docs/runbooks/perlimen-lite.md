@@ -71,6 +71,8 @@ python ops/tests/lite-reset-smoke.py --disposable
 ```
 
 The test supplies an in-memory loopback SMTP sink, starts Lite on a nondefault
-web port, opens the exact mailed link in Chromium, submits the real reset form,
-and verifies single use, session revocation and login with the new password.
-It stops the stack and leaves its disposable database stopped, not deleted.
+web port, and opens the exact mailed verification and reset links in Chromium.
+It submits the real reset form and verifies single use, session revocation and
+login with the new password. After shutdown it checks the unit journal and any
+Next dev trace/log artifacts for both credentials, reporting only counts and
+booleans. The disposable database remains stopped, not deleted.

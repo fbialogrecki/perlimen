@@ -62,7 +62,7 @@ def mailed_url(origin: str, subject: str, path: str) -> str:
     return url
 
 
-def reset(origin: str, executable: str | None) -> None:
+def reset(origin: str, executable: str | None) -> tuple[bytes, bytes]:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
             channel="chromium", executable_path=executable, chromium_sandbox=True
@@ -73,13 +73,15 @@ def reset(origin: str, executable: str | None) -> None:
         email = f"{username}@example.test"
         password = f"Smoke-A9!{secrets.token_hex(8)}"
         api(signed_in, "/api/auth/register", 201, username=username, email=email, password=password)
-        mailed_url(origin, "Verify your email address", "verify-email")
+        verify_url = mailed_url(origin, "Verify your email address", "verify-email")
         api(signed_in, "/api/me", 200)
         api(signed_in, "/api/auth/password/reset/request", 200, email=email)
         url = mailed_url(origin, "Reset your password", "reset-password")
 
         page = browser.new_page()  # Separate, anonymous browser context.
         try:
+            assert page.goto(verify_url).status == 200, "mailed verification page did not load"
+            assert page.url == verify_url, "the mailed verification link was redirected"
             assert page.goto(url).status == 200, "mailed reset page did not load"
             assert page.url == url, "the mailed reset link was redirected"
             for expected in (200, 400):
@@ -91,11 +93,35 @@ def reset(origin: str, executable: str | None) -> None:
                     page.get_by_role("status").wait_for()
                     page.reload()  # Replay the exact URL and prove it is single-use.
         except Error:
-            raise SystemExit("Chromium could not submit the mailed reset form") from None
+            raise SystemExit("Chromium could not open the mailed links or submit reset") from None
 
         api(signed_in, "/api/me", 401)
         api(page, "/api/auth/login", 401, emailOrUsername=username, password=password)
         api(page, "/api/auth/login", 200, emailOrUsername=username, password=password + "-new")
+    return verify_url.split("?token=", 1)[1].encode(), url.split("?token=", 1)[1].encode()
+
+
+def check_diagnostics(unit: str, credentials: tuple[bytes, bytes]) -> None:
+    journal = subprocess.check_output(
+        ["journalctl", "--user", "-u", unit, "--no-pager", "-o", "cat"]
+    )
+    assert b"/readyz" in journal, "expected a readiness request in the Lite journal"
+    journal_leak = any(credential in journal for credential in credentials)
+    artifacts = [
+        path
+        for dist in (ROOT / "apps/web/.next", ROOT / "apps/web/.next-profiles")
+        for path in dist.rglob("*")
+        if path.is_file() and (path.name.startswith("trace") or ".log" in path.name)
+    ]
+    artifact_leaks = 0
+    for path in artifacts:
+        payload = path.read_bytes()
+        artifact_leaks += any(credential in payload for credential in credentials)
+    print(
+        f"Post-stop diagnostics: journal_leak={journal_leak}, "
+        f"next_files={len(artifacts)}, next_files_with_leak={artifact_leaks}"
+    )
+    assert not journal_leak and artifact_leaks == 0, "credentials persisted in diagnostics"
 
 
 def main() -> None:
@@ -111,6 +137,8 @@ def main() -> None:
     ).strip()
     if state.exists() or load_state != "not-found":
         parser.error("use a fresh disposable checkout with no previous Lite state")
+    if any((ROOT / "apps/web" / dist).exists() for dist in (".next", ".next-profiles")):
+        parser.error("use a fresh Next output directory")
 
     env = dict(os.environ)
     for service, default in [("WEB", "59500"), ("API", "59580"), ("PG", "59632")]:
@@ -122,11 +150,12 @@ def main() -> None:
         thread.start()
         try:
             subprocess.run([*LITE, "start"], cwd=ROOT, env=env, check=True)
-            reset(origin, args.chromium_executable)
+            credentials = reset(origin, args.chromium_executable)
         finally:
             smtp.shutdown()
             thread.join()
             subprocess.run([*LITE, "stop"], cwd=ROOT, check=True)
+    check_diagnostics(unit, credentials)
     print("Lite reset passed: exact SMTP link, real form, single use, revocation and new login.")
 
 
