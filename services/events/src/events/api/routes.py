@@ -59,20 +59,21 @@ from events.erasure_write_fence import (
     enforce_account_erasure_write_fence,
 )
 from events.main_dependencies import get_db_session, settings
-from events.settings import Settings
+from events.owner import EventOwner, get_event_owner
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
 from sqlalchemy import Select, String, and_, delete, false, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
 
-from events import media_client, social_client, users_client
+from events import media_client
 from perlimen_common.pagination import clamp_limit
 
 router = APIRouter(dependencies=[Depends(require_internal_token)])
 DbSession = Annotated[Session, Depends(get_db_session)]
 CurrentPrincipal = Annotated[CurrentUser, Depends(require_current_user)]
 WriteQuota = Annotated[None, Depends(require_write_quota)]
+Owners = Annotated[EventOwner, Depends(get_event_owner)]
 
 ALLOWED_ROLES = {"owner", "admin", "editor"}
 
@@ -147,6 +148,7 @@ def _created_cursor_condition(before: str | None) -> ColumnElement[bool] | None:
 
 
 def _events_response(
+    owners: EventOwner,
     session: Session,
     events: list[Event],
     viewer_id: str | None,
@@ -214,8 +216,7 @@ def _events_response(
                 if (artist_id := item.get("artist_profile_id"))
             )
         )[:100]
-        artist_refs = users_client.get_artist_refs(
-            settings,
+        artist_refs = owners.get_artist_refs(
             artist_ids,
         )
 
@@ -242,6 +243,7 @@ def _events_response(
 
 
 def _event_response(
+    owners: EventOwner,
     session: Session,
     event: Event,
     viewer_id: str | None,
@@ -249,6 +251,7 @@ def _event_response(
     lineup_artist_refs: dict[str, dict[str, str]] | None = None,
 ) -> EventResponse:
     return _events_response(
+        owners,
         session,
         [event],
         viewer_id,
@@ -278,6 +281,7 @@ def _enriched_lineup(
 
 
 def _validate_lineup_artist_refs(
+    owners: EventOwner,
     lineup: list[dict[str, str]],
 ) -> dict[str, dict[str, str]]:
     artist_ids = list(
@@ -285,7 +289,7 @@ def _validate_lineup_artist_refs(
     )
     if not artist_ids:
         return {}
-    artist_refs = users_client.get_artist_refs(settings, artist_ids)
+    artist_refs = owners.get_artist_refs(artist_ids)
     if any(artist_id not in artist_refs for artist_id in artist_ids):
         raise HTTPException(status_code=422, detail="invalid lineup artist")
     return artist_refs
@@ -328,7 +332,9 @@ def _event_update_response(event: Event, update: EventUpdate) -> EventUpdateResp
     )
 
 
-def _notify_event_followers(session: Session, event: Event, update: EventUpdate) -> None:
+def _notify_event_followers(
+    owners: EventOwner, session: Session, event: Event, update: EventUpdate
+) -> None:
     follower_ids = session.scalars(
         select(EventFollow.user_id).where(
             EventFollow.event_id == event.id,
@@ -337,8 +343,7 @@ def _notify_event_followers(session: Session, event: Event, update: EventUpdate)
     ).all()
     notification_body = update.body[:500]
     for recipient_user_id in follower_ids:
-        users_client.notify_user(
-            settings,
+        owners.notify_user(
             recipient_user_id=recipient_user_id,
             actor_user_id=update.author_user_id,
             event_type="event.post.created",
@@ -375,48 +380,49 @@ def _validate_event_poster(asset_id: str | None, owner_user_id: str) -> None:
         raise HTTPException(status_code=422, detail="invalid poster media asset") from exc
 
 
-def _announce_event_city_group(settings_obj: Settings, event: Event) -> bool:
-    return social_client.announce_event(settings_obj, event)
-
-
 @router.post("/v1/events", response_model=EventResponse, status_code=status.HTTP_201_CREATED)
 def create_event(
+    owners: Owners,
     payload: EventCreateRequest,
     user: CurrentPrincipal,
     _: WriteQuota,
     session: DbSession,
 ) -> EventResponse:
     _reject_secret_location(payload.location_mode)
-    role = users_client.check_page_role(settings, payload.page_id, user.user_id)
+    role = owners.check_page_role(payload.page_id, user.user_id)
     if role not in ALLOWED_ROLES:
         raise HTTPException(status_code=403, detail="not authorized to manage this page")
     _validate_event_poster(payload.poster_media_asset_id, user.user_id)
-    lineup_artist_refs = _validate_lineup_artist_refs(payload.lineup)
+    lineup_artist_refs = _validate_lineup_artist_refs(owners, payload.lineup)
     enforce_account_erasure_write_fence(session, [user.user_id])
-    event = Event(
-        slug=payload.slug,
-        title=payload.title,
-        description=payload.description,
-        starts_at=payload.starts_at,
-        city=payload.city,
-        location_mode=payload.location_mode,
-        venue_name=payload.venue_name,
-        address=payload.address,
-        genres=payload.genres,
-        lineup=payload.lineup,
-        page_id=payload.page_id,
-        created_by_user_id=user.user_id,
-        poster_media_asset_id=payload.poster_media_asset_id,
-    )
+    fields = payload.model_dump()
+    event = Event(**fields, created_by_user_id=user.user_id)
     session.add(event)
     try:
         session.commit()
     except IntegrityError as exc:
         session.rollback()
+        if owners.retry_announcement_on_conflict:
+            existing = session.scalar(
+                select(Event).where(
+                    Event.slug == payload.slug,
+                    Event.page_id == payload.page_id,
+                    Event.created_by_user_id == user.user_id,
+                    Event.starts_at == payload.starts_at,
+                    Event.deleted_at.is_(None),
+                )
+            )
+            if existing is not None and all(
+                getattr(existing, key) == value
+                for key, value in fields.items()
+                if key != "starts_at"
+            ):
+                owners.announce_event(existing)
         raise HTTPException(status_code=409, detail="event slug already exists") from exc
     session.refresh(event)
-    _announce_event_city_group(settings, event)
+    owners.announce_event(event)
     return _event_response(
+        owners,
         session,
         event,
         user.user_id,
@@ -426,6 +432,7 @@ def create_event(
 
 @router.patch("/v1/events/{slug}", response_model=EventResponse)
 def update_event(
+    owners: Owners,
     slug: str,
     payload: EventUpdateRequest,
     user: CurrentPrincipal,
@@ -433,7 +440,7 @@ def update_event(
     session: DbSession,
 ) -> EventResponse:
     event = _get_active_event(session, slug)
-    role = users_client.check_page_role(settings, event.page_id, user.user_id)
+    role = owners.check_page_role(event.page_id, user.user_id)
     if role not in ALLOWED_ROLES:
         raise HTTPException(status_code=403, detail="not authorized to manage this page")
     enforce_account_erasure_write_fence(session, [user.user_id])
@@ -444,12 +451,13 @@ def update_event(
         _validate_event_poster(updates["poster_media_asset_id"], user.user_id)
     lineup_artist_refs = None
     if "lineup" in updates:
-        lineup_artist_refs = _validate_lineup_artist_refs(updates["lineup"])
+        lineup_artist_refs = _validate_lineup_artist_refs(owners, updates["lineup"])
     for field, value in updates.items():
         setattr(event, field, value)
     session.commit()
     session.refresh(event)
     return _event_response(
+        owners,
         session,
         event,
         user.user_id,
@@ -459,13 +467,14 @@ def update_event(
 
 @router.delete("/v1/events/{slug}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_event(
+    owners: Owners,
     slug: str,
     user: CurrentPrincipal,
     _: WriteQuota,
     session: DbSession,
 ) -> Response:
     event = _get_active_event(session, slug)
-    role = users_client.check_page_role(settings, event.page_id, user.user_id)
+    role = owners.check_page_role(event.page_id, user.user_id)
     if role not in ALLOWED_ROLES:
         raise HTTPException(status_code=403, detail="not authorized to manage this page")
     event.deleted_at = utc_now()
@@ -475,6 +484,7 @@ def delete_event(
 
 @router.get("/v1/events", response_model=EventListResponse)
 def list_events(
+    owners: Owners,
     session: DbSession,
     viewer_id: ViewerId = None,
     city: Annotated[str | None, Query()] = None,
@@ -547,7 +557,7 @@ def list_events(
         else None
     )
     return EventListResponse(
-        items=_events_response(session, visible, viewer_id),
+        items=_events_response(owners, session, visible, viewer_id),
         next_before=next_before,
     )
 
@@ -557,6 +567,7 @@ def list_events(
     response_model=list[EventResponse],
 )
 def get_event_feed_candidates(
+    owners: Owners,
     payload: EventFeedCandidatesRequest,
     session: DbSession,
     viewer_id: ViewerId = None,
@@ -617,6 +628,7 @@ def get_event_feed_candidates(
     )
     events = [event for event, _, _, _, _ in rows]
     return _events_response(
+        owners,
         session,
         events,
         viewer_id,
@@ -629,7 +641,9 @@ def get_event_feed_candidates(
 
 
 @router.post("/internal/v1/events/batch", response_model=list[EventResponse])
-def get_events_batch(payload: EventBatchRequest, session: DbSession) -> list[EventResponse]:
+def get_events_batch(
+    owners: Owners, payload: EventBatchRequest, session: DbSession
+) -> list[EventResponse]:
     slugs = list(dict.fromkeys(payload.slugs))
     if not slugs:
         return []
@@ -658,6 +672,7 @@ def get_events_batch(payload: EventBatchRequest, session: DbSession) -> list[Eve
     events = {event.slug: event for event, _, _ in rows}
     ordered = [events[slug] for slug in slugs if slug in events]
     return _events_response(
+        owners,
         session,
         ordered,
         None,
@@ -750,9 +765,11 @@ def erase_account_data(
 
 
 @router.get("/v1/events/{slug}", response_model=EventResponse)
-def get_event(slug: str, session: DbSession, viewer_id: ViewerId = None) -> EventResponse:
+def get_event(
+    owners: Owners, slug: str, session: DbSession, viewer_id: ViewerId = None
+) -> EventResponse:
     event = _get_active_event(session, slug)
-    return _event_response(session, event, viewer_id)
+    return _event_response(owners, session, event, viewer_id)
 
 
 @router.get("/v1/event-updates", response_model=EventUpdateListResponse)
@@ -795,6 +812,7 @@ def list_all_event_updates(
     status_code=status.HTTP_201_CREATED,
 )
 def create_event_update(
+    owners: Owners,
     slug: str,
     payload: EventUpdateCreateRequest,
     user: CurrentPrincipal,
@@ -802,7 +820,7 @@ def create_event_update(
     session: DbSession,
 ) -> EventUpdateResponse:
     event = _get_active_event(session, slug)
-    role = users_client.check_page_role(settings, event.page_id, user.user_id)
+    role = owners.check_page_role(event.page_id, user.user_id)
     if role not in ALLOWED_ROLES:
         raise HTTPException(status_code=403, detail="not authorized to update this event")
     enforce_account_erasure_write_fence(session, [user.user_id])
@@ -815,7 +833,7 @@ def create_event_update(
     session.add(update)
     session.commit()
     session.refresh(update)
-    _notify_event_followers(session, event, update)
+    _notify_event_followers(owners, session, event, update)
     return _event_update_response(event, update)
 
 
@@ -973,8 +991,8 @@ def _quota_summaries(session: Session, event: Event) -> list[GuestQuotaResponse]
     ]
 
 
-def _require_event_manager(event: Event, user_id: str) -> None:
-    role = users_client.check_page_role(settings, event.page_id, user_id)
+def _require_event_manager(owners: EventOwner, event: Event, user_id: str) -> None:
+    role = owners.check_page_role(event.page_id, user_id)
     if role not in ALLOWED_ROLES:
         raise HTTPException(status_code=403, detail="not authorized to manage this event")
 
@@ -984,22 +1002,23 @@ def _door_staff_lock_query(
     *,
     user_id: str | None = None,
     assignment_id: str | None = None,
+    lock: bool = True,
 ) -> Select[tuple[EventDoorStaff]]:
     query = select(EventDoorStaff).where(EventDoorStaff.event_id == event_id)
     if user_id is not None:
         query = query.where(EventDoorStaff.user_id == user_id)
     if assignment_id is not None:
         query = query.where(EventDoorStaff.id == assignment_id)
-    return query.with_for_update()
+    return query.with_for_update() if lock else query
 
 
-def _require_check_in_access(session: Session, event: Event, user_id: str) -> None:
-    role = users_client.check_page_role(settings, event.page_id, user_id)
-    if role in ALLOWED_ROLES:
-        return
-    door_staff = session.scalar(_door_staff_lock_query(event.id, user_id=user_id))
-    if door_staff is None or user_id not in users_client.get_active_user_refs(settings, [user_id]):
+def _check_in_is_manager(owners: EventOwner, session: Session, event: Event, user_id: str) -> bool:
+    if owners.check_page_role(event.page_id, user_id) in ALLOWED_ROLES:
+        return True
+    assignment = _door_staff_lock_query(event.id, user_id=user_id, lock=False)
+    if session.scalar(assignment) is None or user_id not in owners.get_active_user_refs([user_id]):
         raise HTTPException(status_code=403, detail="not authorized to check in guests")
+    return False
 
 
 def _door_staff_response(
@@ -1018,12 +1037,10 @@ def _door_staff_response(
     response_model=EventViewerContextResponse,
 )
 def get_event_viewer_context(
-    slug: str, user: CurrentPrincipal, session: DbSession
+    owners: Owners, slug: str, user: CurrentPrincipal, session: DbSession
 ) -> EventViewerContextResponse:
     event = _get_active_event(session, slug)
-    is_manager = (
-        users_client.check_page_role(settings, event.page_id, user.user_id) in ALLOWED_ROLES
-    )
+    is_manager = owners.check_page_role(event.page_id, user.user_id) in ALLOWED_ROLES
     guest_entry, door_staff_id = session.execute(
         select(EventGuestlistEntry, EventDoorStaff.id)
         .select_from(Event)
@@ -1045,8 +1062,7 @@ def get_event_viewer_context(
         .where(Event.id == event.id)
     ).one()
     can_check_in = is_manager or (
-        door_staff_id is not None
-        and user.user_id in users_client.get_active_user_refs(settings, [user.user_id])
+        door_staff_id is not None and user.user_id in owners.get_active_user_refs([user.user_id])
     )
     quota_summaries = _quota_summaries(session, event)
     quotas_by_artist = {quota.artist_profile_id: quota for quota in quota_summaries}
@@ -1058,7 +1074,7 @@ def get_event_viewer_context(
             if (artist_id := item.get("artist_profile_id"))
         )
     )
-    artist_refs = users_client.get_artist_refs(settings, lineup_artist_ids)
+    artist_refs = owners.get_artist_refs(lineup_artist_ids)
     viewer_lineup_artists = []
     for artist_profile_id in lineup_artist_ids:
         artist = artist_refs.get(artist_profile_id)
@@ -1098,10 +1114,10 @@ def get_event_viewer_context(
 
 @router.get("/v1/events/{slug}/guestlist", response_model=list[ManagerGuestlistEntryResponse])
 def list_guestlist(
-    slug: str, user: CurrentPrincipal, session: DbSession
+    owners: Owners, slug: str, user: CurrentPrincipal, session: DbSession
 ) -> list[ManagerGuestlistEntryResponse]:
     event = _get_active_event(session, slug)
-    _require_event_manager(event, user.user_id)
+    _require_event_manager(owners, event, user.user_id)
     entries = session.scalars(
         select(EventGuestlistEntry)
         .where(EventGuestlistEntry.event_id == event.id)
@@ -1134,16 +1150,16 @@ def _write_access_audit(
 
 @router.get("/v1/events/{slug}/door-staff", response_model=list[DoorStaffResponse])
 def list_door_staff(
-    slug: str, user: CurrentPrincipal, session: DbSession
+    owners: Owners, slug: str, user: CurrentPrincipal, session: DbSession
 ) -> list[DoorStaffResponse]:
     event = _get_active_event(session, slug)
-    _require_event_manager(event, user.user_id)
+    _require_event_manager(owners, event, user.user_id)
     rows = session.scalars(
         select(EventDoorStaff)
         .where(EventDoorStaff.event_id == event.id)
         .order_by(EventDoorStaff.assigned_at.asc(), EventDoorStaff.id.asc())
     ).all()
-    refs = users_client.get_active_user_refs(settings, [row.user_id for row in rows])
+    refs = owners.get_active_user_refs([row.user_id for row in rows])
     return [_door_staff_response(row, refs.get(row.user_id)) for row in rows]
 
 
@@ -1189,6 +1205,7 @@ def _get_or_create_door_staff(
     response_model=DoorStaffResponse,
 )
 def assign_door_staff(
+    owners: Owners,
     slug: str,
     door_username: str,
     user: CurrentPrincipal,
@@ -1196,8 +1213,8 @@ def assign_door_staff(
     session: DbSession,
 ) -> DoorStaffResponse:
     event = _get_active_event(session, slug)
-    _require_event_manager(event, user.user_id)
-    resolved = users_client.get_user_by_username(settings, door_username)
+    _require_event_manager(owners, event, user.user_id)
+    resolved = owners.get_user_by_username(door_username)
     if resolved is None:
         raise HTTPException(status_code=404, detail="user not found")
     enforce_account_erasure_write_fence(session, [user.user_id, resolved["user_id"]])
@@ -1224,6 +1241,7 @@ def assign_door_staff(
 
 @router.delete("/v1/events/{slug}/door-staff/{assignment_id}", status_code=204)
 def revoke_door_staff(
+    owners: Owners,
     slug: str,
     assignment_id: str,
     user: CurrentPrincipal,
@@ -1231,7 +1249,7 @@ def revoke_door_staff(
     session: DbSession,
 ) -> Response:
     event = _get_active_event(session, slug)
-    _require_event_manager(event, user.user_id)
+    _require_event_manager(owners, event, user.user_id)
     door_staff_user_id = session.scalar(
         select(EventDoorStaff.user_id).where(
             EventDoorStaff.event_id == event.id,
@@ -1319,10 +1337,15 @@ def _claim_guestlist_entry(
 
 
 def _require_artist_quota(
-    session: Session, event: Event, artist_profile_id: str, user_id: str, guest_user_id: str
+    owners: EventOwner,
+    session: Session,
+    event: Event,
+    artist_profile_id: str,
+    user_id: str,
+    guest_user_id: str,
 ) -> None:
     _require_lineup_artist(event, artist_profile_id)
-    artist = users_client.get_artist_ref(settings, artist_profile_id)
+    artist = owners.get_artist_ref(artist_profile_id)
     if artist is None:
         raise HTTPException(status_code=404, detail="artist profile not found")
     if (artist.get("owner_user_id") or artist.get("user_id")) != user_id:
@@ -1357,6 +1380,7 @@ def _require_artist_quota(
     response_model=GuestQuotaResponse,
 )
 def set_guest_quota(
+    owners: Owners,
     slug: str,
     artist_profile_id: str,
     payload: GuestQuotaRequest,
@@ -1365,9 +1389,9 @@ def set_guest_quota(
     session: DbSession,
 ) -> GuestQuotaResponse:
     event = _get_active_event(session, slug)
-    _require_event_manager(event, user.user_id)
+    _require_event_manager(owners, event, user.user_id)
     _require_lineup_artist(event, artist_profile_id)
-    if users_client.get_artist_ref(settings, artist_profile_id) is None:
+    if owners.get_artist_ref(artist_profile_id) is None:
         raise HTTPException(status_code=404, detail="artist profile not found")
     enforce_account_erasure_write_fence(session, [user.user_id])
     quota = session.scalar(
@@ -1406,6 +1430,7 @@ def set_guest_quota(
     response_model=GuestQuotaResponse,
 )
 def set_guest_quota_alias(
+    owners: Owners,
     slug: str,
     artist_profile_id: str,
     payload: GuestQuotaRequest,
@@ -1413,11 +1438,12 @@ def set_guest_quota_alias(
     _: WriteQuota,
     session: DbSession,
 ) -> GuestQuotaResponse:
-    return set_guest_quota(slug, artist_profile_id, payload, user, _, session)
+    return set_guest_quota(owners, slug, artist_profile_id, payload, user, _, session)
 
 
 @router.post("/v1/events/{slug}/guestlist", response_model=GuestlistEntryResponse, status_code=201)
 def add_guestlist_entry(
+    owners: Owners,
     slug: str,
     payload: GuestlistAddRequest,
     user: CurrentPrincipal,
@@ -1438,10 +1464,10 @@ def add_guestlist_entry(
     )
     if payload.artist_profile_id:
         _require_artist_quota(
-            session, event, payload.artist_profile_id, user.user_id, guest_user_id
+            owners, session, event, payload.artist_profile_id, user.user_id, guest_user_id
         )
     else:
-        _require_event_manager(event, user.user_id)
+        _require_event_manager(owners, event, user.user_id)
     if entry is None:
         entry = EventGuestlistEntry(
             event_id=event.id,
@@ -1474,8 +1500,8 @@ def add_guestlist_entry(
             "source": "dj" if entry.added_by_artist_profile_id else "organizer",
         },
     )
-    users_client.notify_user(
-        settings,
+    session.commit()
+    owners.notify_user(
         recipient_user_id=entry.guest_user_id,
         actor_user_id=user.user_id,
         event_type="guestlist.added",
@@ -1492,7 +1518,6 @@ def add_guestlist_entry(
             "access_state": "approved",
         },
     )
-    session.commit()
     session.refresh(entry)
     return _guestlist_entry_response(event, entry)
 
@@ -1503,6 +1528,7 @@ def add_guestlist_entry(
     status_code=201,
 )
 def add_dj_guestlist_entry(
+    owners: Owners,
     slug: str,
     payload: GuestlistAddRequest,
     user: CurrentPrincipal,
@@ -1511,7 +1537,7 @@ def add_dj_guestlist_entry(
 ) -> GuestlistEntryResponse:
     if not payload.artist_profile_id:
         raise HTTPException(status_code=422, detail="artist profile id required")
-    return add_guestlist_entry(slug, payload, user, _, session)
+    return add_guestlist_entry(owners, slug, payload, user, _, session)
 
 
 @router.get("/v1/events/{slug}/access", response_model=EventAccessResponse)
@@ -1538,6 +1564,7 @@ def get_event_access(slug: str, user: CurrentPrincipal, session: DbSession) -> E
 
 @router.delete("/v1/events/{slug}/guestlist/{guest_user_id}", status_code=204)
 def remove_guestlist_entry(
+    owners: Owners,
     slug: str,
     guest_user_id: str,
     user: CurrentPrincipal,
@@ -1545,7 +1572,7 @@ def remove_guestlist_entry(
     session: DbSession,
 ) -> Response:
     event = _get_active_event(session, slug)
-    _require_event_manager(event, user.user_id)
+    _require_event_manager(owners, event, user.user_id)
     enforce_account_erasure_write_fence(session, [user.user_id, guest_user_id])
     entry = session.scalar(_guestlist_entry_lock_query(event.id, guest_user_id))
     if entry is None:
@@ -1562,8 +1589,8 @@ def remove_guestlist_entry(
         target_id=entry.id,
         metadata={"guest_user_id": entry.guest_user_id},
     )
-    users_client.notify_user(
-        settings,
+    session.commit()
+    owners.notify_user(
         recipient_user_id=entry.guest_user_id,
         actor_user_id=user.user_id,
         event_type="guestlist.removed",
@@ -1580,7 +1607,6 @@ def remove_guestlist_entry(
             "access_state": "rejected",
         },
     )
-    session.commit()
     return Response(status_code=204)
 
 
@@ -1636,6 +1662,7 @@ def create_guest_check_in_token_alias(
 
 @router.post("/v1/events/{slug}/check-in", response_model=CheckInResponse)
 def check_in_guest(
+    owners: Owners,
     slug: str,
     payload: CheckInRequest,
     user: CurrentPrincipal,
@@ -1643,6 +1670,7 @@ def check_in_guest(
     session: DbSession,
 ) -> CheckInResponse:
     event = _get_active_event(session, slug)
+    is_manager = _check_in_is_manager(owners, session, event, user.user_id)
     token = session.scalar(
         select(EventCheckInToken).where(
             EventCheckInToken.event_id == event.id,
@@ -1657,7 +1685,11 @@ def check_in_guest(
     if entry is None or entry.status != GuestlistEntryStatus.active.value:
         raise HTTPException(status_code=404, detail="guestlist access not found")
     enforce_account_erasure_write_fence(session, [user.user_id, entry.guest_user_id])
-    _require_check_in_access(session, event, user.user_id)
+    if (
+        not is_manager
+        and session.scalar(_door_staff_lock_query(event.id, user_id=user.user_id)) is None
+    ):
+        raise HTTPException(status_code=403, detail="not authorized to check in guests")
     now = utc_now()
     if not _claim_guestlist_entry(
         session,
@@ -1690,18 +1722,19 @@ def check_in_guest(
 
 @router.post("/v1/events/{slug}/check-ins/validate", response_model=CheckInResponse)
 def check_in_guest_alias(
+    owners: Owners,
     slug: str,
     payload: CheckInRequest,
     user: CurrentPrincipal,
     _: WriteQuota,
     session: DbSession,
 ) -> CheckInResponse:
-    return check_in_guest(slug, payload, user, _, session)
+    return check_in_guest(owners, slug, payload, user, _, session)
 
 
 @router.post("/v1/events/{slug}/follow", response_model=EventResponse)
 def follow_event(
-    slug: str, user: CurrentPrincipal, _: WriteQuota, session: DbSession
+    owners: Owners, slug: str, user: CurrentPrincipal, _: WriteQuota, session: DbSession
 ) -> EventResponse:
     event = _get_active_event(session, slug)
     enforce_account_erasure_write_fence(session, [user.user_id])
@@ -1712,7 +1745,7 @@ def follow_event(
         session.rollback()
         raise HTTPException(status_code=409, detail="already following") from exc
     session.refresh(event)
-    return _event_response(session, event, user.user_id)
+    return _event_response(owners, session, event, user.user_id)
 
 
 @router.delete("/v1/events/{slug}/follow", status_code=status.HTTP_204_NO_CONTENT)
@@ -1734,7 +1767,7 @@ def unfollow_event(
 
 @router.post("/v1/events/{slug}/boost", response_model=EventResponse)
 def boost_event(
-    slug: str, user: CurrentPrincipal, _: WriteQuota, session: DbSession
+    owners: Owners, slug: str, user: CurrentPrincipal, _: WriteQuota, session: DbSession
 ) -> EventResponse:
     event = _get_active_event(session, slug)
     enforce_account_erasure_write_fence(session, [user.user_id])
@@ -1745,7 +1778,7 @@ def boost_event(
         session.rollback()
         raise HTTPException(status_code=409, detail="already boosting") from exc
     session.refresh(event)
-    return _event_response(session, event, user.user_id)
+    return _event_response(owners, session, event, user.user_id)
 
 
 @router.delete("/v1/events/{slug}/boost", status_code=status.HTTP_204_NO_CONTENT)

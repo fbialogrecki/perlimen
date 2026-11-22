@@ -53,6 +53,13 @@ also honor blocks. Mentions and notification writes use the owner APIs without H
 The Lite migrator removes the legacy Social block projection under the Social migration role;
 Lite starts neither the subscriber nor the repair loop. Standalone keeps its existing transport.
 
+Events resolves Page roles, artists and door staff and delivers notifications through Users;
+it publishes city announcements through Social, using separate owner sessions. An exact
+create retry by the event's creator still returns the existing slug conflict but can replay
+Social delivery for the same event ID. Social's unique event-to-post mapping prevents
+duplicate announcements. Delivery is best effort when Social or the official group is unavailable.
+Guestlist and QR operations keep Events' authorization and transaction rules in both profiles.
+
 Other cross-domain integrations can still be unavailable: legacy outbound URLs/NATS are
 disabled in this process, and blob routes fail closed until local storage is wired. The existing users erasure worker is registered with
 the users session factory, but end-to-end erasure is not enabled by this alone.
@@ -64,11 +71,13 @@ With a **fresh disposable instance**, supply the migrator and API variables abov
 (the test supplies the media directory and internal token), then run:
 
 ```sh
-PERLIMEN_LITE_TEST_FRESH_POSTGRES=1 uv run --frozen pytest -q perlimen_lite/tests
+PERLIMEN_LITE_TEST_FRESH_POSTGRES=1 uv run --frozen python -m pytest -q perlimen_lite/tests
 ```
 
 The test rejects an already populated schema, runs the migration CLI twice,
 checks own-schema access and sibling/DDL denials, then exercises the composed app. It
 compares SQL query counts for one versus multiple Feed posts and checks that the canonical
 block takes effect immediately with no Social projection table.
-It creates a synthetic account; destroy only that disposable test instance afterwards.
+It also verifies announcement replay and races two authorized scans on separate PostgreSQL
+connections, checking the committed admission and audit row. It creates synthetic accounts;
+destroy only that disposable test instance afterwards.

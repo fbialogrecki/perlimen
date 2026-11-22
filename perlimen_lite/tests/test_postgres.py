@@ -4,7 +4,10 @@ import os
 import secrets
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Barrier
 
 import psycopg
 import pytest
@@ -191,6 +194,150 @@ def test_migrate_and_serve_fresh_postgres(tmp_path: Path, monkeypatch: pytest.Mo
         assert client.get(f"{auth_path}/me").status_code == 401
         assert not client.cookies
         check_social_policy(client)
+        check_events(client)
+
+
+def check_events(client: TestClient) -> None:
+    from social.domain.models import Group
+    from sqlalchemy.orm import Session
+
+    def account(username: str) -> dict[str, str]:
+        client.cookies.clear()
+        registered = client.post(
+            "/users/v1/auth/register",
+            json={
+                "username": username,
+                "password": f"Fixture-A8!{secrets.token_hex(8)}",
+                "email": f"{username}@example.test",
+            },
+        )
+        assert registered.status_code == 201
+        return {"X-Threshold-User-Id": registered.json()["user"]["id"]}
+
+    guest = account("pgdoor-guest")
+    door = account("pgdoor-staff")
+    owner = account("pgdoor-owner")
+    city = "Disposable Crosspost City"
+    page = client.post(
+        "/users/v1/pages",
+        json={
+            "slug": "pgdoor-page",
+            "display_name": "Fixture Room",
+            "page_type": "club",
+            "city": city,
+        },
+    )
+    assert page.status_code == 201
+    payload = {
+        "page_id": page.json()["id"],
+        "slug": "pgdoor-event",
+        "city": city,
+        "title": "Fixture night",
+        "starts_at": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
+        "location_mode": "tba",
+    }
+    events = "/events/v1/events"
+    assert client.post(events, json=payload, headers=guest).status_code == 403
+    created = client.post(events, json=payload, headers=owner)
+    assert created.status_code == 201
+    event_id = created.json()["id"]
+    social_engine = engine_for(endpoint(), "social", "runtime")
+    try:
+        with Session(social_engine) as session:
+            session.add(Group(slug="pgdoor-city", name="Fixture group", city=city, official=True))
+            session.commit()
+        assert (
+            client.post(
+                events, json={**payload, "title": "Not a replay"}, headers=owner
+            ).status_code
+            == 409
+        )
+        with social_engine.connect() as conn:
+            assert (
+                conn.exec_driver_sql(
+                    "SELECT count(*) FROM event_announcements WHERE event_id = %s", (event_id,)
+                ).scalar_one()
+                == 0
+            )
+        for _ in range(2):
+            assert client.post(events, json=payload, headers=owner).status_code == 409
+        with social_engine.connect() as conn:
+            assert (
+                conn.exec_driver_sql(
+                    "SELECT count(*) FROM event_announcements WHERE event_id = %s", (event_id,)
+                ).scalar_one()
+                == 1
+            )
+            assert (
+                conn.exec_driver_sql(
+                    "SELECT count(*) FROM posts WHERE event_id = %s AND author_type = 'system'",
+                    (event_id,),
+                ).scalar_one()
+                == 1
+            )
+    finally:
+        social_engine.dispose()
+
+    path = f"{events}/{payload['slug']}"
+    guest_id = guest["X-Threshold-User-Id"]
+    invited = client.post(
+        f"{path}/guestlist",
+        headers=owner,
+        json={
+            "guest_user_id": guest_id,
+            "username": "pgdoor-guest",
+            "display_name": "PG Fixture Guest",
+        },
+    )
+    assert invited.status_code == 201
+    assert client.get(f"{path}/guestlist", headers=door).status_code == 403
+    assert guest_id not in client.get(path).text
+    assert (
+        client.put(f"{path}/door-staff/by-username/pgdoor-staff", headers=owner).status_code == 200
+    )
+    issued = client.post(f"{path}/guestlist/me/qr-token", headers=guest)
+    assert issued.status_code == 201
+    token = issued.json()["token"]
+
+    simultaneous = Barrier(2, timeout=5)
+    connections: set[int] = set()
+
+    def synchronize_scans(conn: Connection, _cursor: object, statement: str, *_: object) -> None:
+        if statement.startswith("SELECT") and "event_check_in_tokens.token_hash =" in statement:
+            driver = conn.connection.driver_connection
+            assert isinstance(driver, psycopg.Connection)
+            connections.add(driver.info.backend_pid)
+            simultaneous.wait()
+
+    def scan(headers: dict[str, str]) -> int:
+        return client.post(f"{path}/check-in", headers=headers, json={"token": token}).status_code
+
+    event.listen(Engine, "after_cursor_execute", synchronize_scans)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            assert sorted(pool.map(scan, [owner, door])) == [200, 409]
+    finally:
+        event.remove(Engine, "after_cursor_execute", synchronize_scans)
+    assert len(connections) == 2
+    assert client.get(f"{path}/access", headers=guest).json()["checked_in_at"] is not None
+    events_engine = engine_for(endpoint(), "events", "runtime")
+    try:
+        with events_engine.connect() as conn:
+            assert (
+                conn.exec_driver_sql(
+                    "SELECT count(*) FROM event_access_audit_logs "
+                    "WHERE event_id = %s AND action = 'guestlist.checked_in'",
+                    (event_id,),
+                ).scalar_one()
+                == 1
+            )
+            stored_hash, status = conn.exec_driver_sql(
+                "SELECT token_hash, status FROM event_check_in_tokens WHERE event_id = %s",
+                (event_id,),
+            ).one()
+            assert status == "used" and stored_hash != token
+    finally:
+        events_engine.dispose()
 
 
 def check_social_policy(client: TestClient) -> None:

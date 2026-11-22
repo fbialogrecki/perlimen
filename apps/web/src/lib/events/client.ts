@@ -71,9 +71,16 @@ export async function eventsCall(
   return { status: response.status, body: parsed }
 }
 
-function responseFromEvents(result: { status: number; body: unknown }): Response {
-  if (result.status === 204) return new Response(null, { status: 204 })
-  return Response.json(result.body, { status: result.status })
+function responseFromEvents(
+  result: { status: number; body: unknown },
+  privateResponse = false,
+): Response {
+  const init = {
+    status: result.status,
+    headers: privateResponse ? { "Cache-Control": "private, no-store" } : undefined,
+  }
+  if (result.status === 204) return new Response(null, init)
+  return Response.json(result.body, init)
 }
 
 export async function guardEventsMutation(request: Request): Promise<Response | null> {
@@ -104,13 +111,14 @@ export async function proxyEventsGet(
   try {
     const query = request ? new URL(request.url).searchParams : undefined
     const result = await eventsCall(path, { ...options, query })
+    const privateResponse = Boolean(options.includeViewer || options.requireViewer)
     if (result.status >= 200 && result.status < 300 && options.successBody) {
       const body = options.successBody(result.body)
       return body === null
         ? Response.json({ error: "invalid upstream response" }, { status: 502 })
-        : Response.json(body, { status: result.status })
+        : responseFromEvents({ status: result.status, body }, privateResponse)
     }
-    return responseFromEvents(result)
+    return responseFromEvents(result, privateResponse)
   } catch (error) {
     if (error instanceof EventsServiceConfigurationError) {
       safeLogFailure({ service: "events", operation: "proxy_get", kind: "configuration" }, error)
@@ -143,12 +151,12 @@ export async function proxyEventsMutation(
       const body = options.successBody(result.body)
       return body === null
         ? Response.json({ error: "invalid upstream response" }, { status: 502 })
-        : Response.json(body, { status: result.status })
+        : responseFromEvents({ status: result.status, body }, true)
     }
     if ((result.status < 200 || result.status >= 300) && options.hideErrorBody) {
       return Response.json({ error: "upstream request failed" }, { status: result.status })
     }
-    return responseFromEvents(result)
+    return responseFromEvents(result, true)
   } catch (error) {
     if (error instanceof EventsServiceConfigurationError) {
       safeLogFailure({ service: "events", operation: "proxy_mutation", kind: "configuration" }, error)
