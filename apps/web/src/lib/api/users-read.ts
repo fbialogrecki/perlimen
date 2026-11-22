@@ -7,6 +7,7 @@ import {
 } from "@/lib/auth/product-auth"
 import { resolveUsersServiceUrl } from "@/lib/auth/users-service-url"
 import type { OrganizerRef } from "@/lib/feed/hydration"
+import { correlateLiteCall } from "@/lib/http/lite-diagnostics"
 import { pageType, type PageType } from "@/lib/page-types"
 import type { ExternalLink, FollowTarget, Residency } from "@/lib/types"
 
@@ -217,15 +218,17 @@ export async function getOrganizerRefs(pageIds: string[]): Promise<OrganizerRef[
     return []
   }
   try {
+    const headers = new Headers({
+      accept: "application/json",
+      "content-type": "application/json",
+      "X-Threshold-Internal-Token": process.env.THRESHOLD_INTERNAL_TOKEN,
+    })
+    await correlateLiteCall(headers)
     const response = await fetch(
       `${resolveUsersServiceUrl(process.env.USERS_SERVICE_URL)}/internal/v1/pages/organizer-refs`,
       {
         method: "POST",
-        headers: {
-          accept: "application/json",
-          "content-type": "application/json",
-          "X-Threshold-Internal-Token": process.env.THRESHOLD_INTERNAL_TOKEN,
-        },
+        headers,
         body: JSON.stringify({ page_ids: ids }),
         cache: "no-store",
       },

@@ -54,13 +54,28 @@ sink bound to `127.0.0.1`. Lite uses no SMTP credentials and builds both reset
 and verification links from the Next.js origin, including the selected web port.
 Stop before changing this setting. Never forward captured mail or use real accounts.
 
+The default Lite start runs only Next.js, the Lite API and PostgreSQL: no Tempo,
+OTLP export, Grafana datasource, Mimir, Loki, Grafana, Alloy, Collector or
+Prometheus. The API writes JSON request IDs, route templates, status and timings
+to the unit journal. While the service is up, read the private BFF timing file
+at `$XDG_RUNTIME_DIR/<checkout-instance>/bff.jsonl` (removed on stop). It times
+`/app`, check-in and upload from Proxy ingress to App Router response close;
+matching API rows share the generated request ID. Lite discards raw Next.js
+development output and disables its local span writer and MCP log file. This
+does not remove any traces or logs left by a previous non-Lite or unpatched run.
+Diagnostic records omit request values and are not the product audit:
+audit rows stay in their originating PostgreSQL schemas under existing access rules.
+
 On a **fresh disposable checkout** containing both changes, run
 `bash ops/tests/lite-smoke.sh --disposable` (requires `python3`). It checks
 loopback binding, Next.js and API readiness, and synthetic registration and
-login through Next.js. A second start preserves the running PID, and login
-returns the same account after stop/start. The test checks listener/cgroup
-cleanup and leaves the isolated volume stopped, not deleted. It does not test
-browser cookie handling, refresh rotation or media uploads.
+login through Next.js. It checks the journal, BFF timings and Next diagnostic
+files for synthetic reset and verification link values while running and after
+stop. Rerun this smoke test when upgrading the pinned Next.js version. A second
+start preserves the running PID, and login returns the same account after
+stop/start. The test checks listener/cgroup cleanup and leaves the isolated volume
+stopped, not deleted. It does not test browser cookie handling, refresh rotation
+or media uploads.
 
 For the reset regression, use a separate fresh disposable checkout with locked web
 dependencies and a Python environment with Playwright and its Chromium installed:

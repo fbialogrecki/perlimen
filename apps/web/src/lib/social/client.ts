@@ -1,6 +1,7 @@
 import "server-only"
 
 import { getSession, type Session } from "@/lib/auth/session"
+import { correlateLiteCall } from "@/lib/http/lite-diagnostics"
 
 export class SocialServiceConfigurationError extends Error {
   constructor(message = "SOCIAL_SERVICE_URL or THRESHOLD_INTERNAL_TOKEN is not configured") {
@@ -42,6 +43,7 @@ export async function socialCall(
     "X-Threshold-Internal-Token": internalToken(),
     ...options.userHeaders,
   })
+  await correlateLiteCall(headers)
   let body: string | undefined
 
   if (options.json !== undefined) {

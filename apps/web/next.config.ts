@@ -10,6 +10,8 @@ const nextConfig: NextConfig = {
     // These incoming URLs contain single-use credentials.
     incomingRequests: { ignore: [/^\/(?:reset-password|verify-email)\/?(?:\?|$)/] },
   },
+  // Next dev persists raw console output for MCP unless it is disabled here.
+  ...(process.env.PERLIMEN_LITE_BFF_LOG && { experimental: { mcpServer: false } }),
 };
 
 export default withNextIntl(nextConfig);

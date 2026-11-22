@@ -137,7 +137,7 @@ migration_pid=
         export THRESHOLD_SMTP_ENABLED=true THRESHOLD_SMTP_HOST="$host" THRESHOLD_SMTP_PORT="$smtp_port"
         export THRESHOLD_WEB_HOST="$web_origin"
     fi
-    exec uv run --frozen --no-dev --python 3.13 python -m uvicorn perlimen_lite.main:app --host "$host" --port "$api_port" --no-proxy-headers
+    exec uv run --frozen --no-dev --python 3.13 python -m perlimen_lite.serve "$api_port"
 ) &
 api_pid=$!
 http=(curl -q --noproxy '*' --fail --silent --max-time 3)
@@ -150,8 +150,14 @@ await API "$api_pid" 45 "${http[@]}" "$api_url/readyz"
     export EVENTS_SERVICE_URL="$api_url/events" MEDIA_SERVICE_URL="$api_url/media"
     export PERLIMEN_LITE_API_PORT="$api_port"
     export NEXTAUTH_URL="$web_origin"
+    export PERLIMEN_LITE_BFF_LOG="$RUNTIME_DIRECTORY/bff.jsonl"
+    : > "$PERLIMEN_LITE_BFF_LOG"
     export NODE_ENV=development NEXT_TELEMETRY_DISABLED=1 AUTH_COOKIE_SECURE=true WEB_TRUSTED_LAN_HTTP=false
-    exec bun ./node_modules/next/dist/bin/next dev --hostname "$host" --port "$web_port"
+    # Pinned Next dev records raw URLs in spans independently of telemetry. Set
+    # its millisecond threshold above the maximum representable span (2^53−1 µs).
+    export NEXT_TRACE_SPAN_THRESHOLD_MS=9007199254741
+    # Next development output can include URLs, fetch details and raw errors.
+    exec bun ./node_modules/next/dist/bin/next dev --hostname "$host" --port "$web_port" >/dev/null 2>&1
 ) &
 web_pid=$!
 await web "$web_pid" 75 "${http[@]}" "$web_origin/"

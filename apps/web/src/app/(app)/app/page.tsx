@@ -6,10 +6,12 @@ import { FeedList } from "@/components/feed/feed-list"
 import { getFeed } from "@/lib/api/feed"
 import { cityLabel } from "@/lib/cities"
 import { emptyFeedActions } from "@/lib/feed/empty-actions"
+import { observeLiteResponse } from "@/lib/http/lite-diagnostics"
 
 export const dynamic = "force-dynamic"
 
 export default async function FeedPage() {
+  await observeLiteResponse("/app")
   const [items, session, t, locale] = await Promise.all([
     getFeed(),
     auth(),
