@@ -15,7 +15,6 @@ export PERLIMEN_LITE_API_PORT=${PERLIMEN_LITE_API_PORT:-58380}
 export PERLIMEN_LITE_PG_PORT=${PERLIMEN_LITE_PG_PORT:-58432}
 ports=("$PERLIMEN_LITE_WEB_PORT" "$PERLIMEN_LITE_API_PORT" "$PERLIMEN_LITE_PG_PORT")
 pg=(podman --remote=false --root "$state/containers" --runroot "$runtime/containers")
-psql=("${pg[@]}" exec postgres psql -XqAt -v ON_ERROR_STOP=1 -U lite_bootstrap -d perlimen_lite)
 
 ready() {
     curl -qfsS --noproxy '*' --max-time 10 "http://127.0.0.1:$PERLIMEN_LITE_WEB_PORT/" -o /dev/null
@@ -24,6 +23,47 @@ ready() {
         [[ $(ss -H -ltn "sport = :$port" | awk '{print $4}') == "127.0.0.1:$port" ]]
     done
     [[ $("${pg[@]}" ps --format '{{.Names}}') == postgres ]]
+}
+
+auth() {
+    python3 -I - "$1" <<'PY'
+import json
+import os
+import sys
+from http.client import HTTPConnection
+from http.cookies import SimpleCookie
+
+port = int(os.environ["PERLIMEN_LITE_WEB_PORT"])
+username = "lite-smoke-user"
+password = "Dev-Smoke-Only-123!"
+step = sys.argv[1]
+payload = {"password": password}
+if step == "register":
+    payload.update(username=username, email=f"{username}@example.test")
+else:
+    payload["emailOrUsername"] = username
+
+web = HTTPConnection("127.0.0.1", port, timeout=20)
+web.request("POST", f"/api/auth/{step}", json.dumps(payload), {
+    "Content-Type": "application/json", "Origin": f"http://127.0.0.1:{port}",
+})
+response = web.getresponse()
+expected = 201 if step == "register" else 200
+if response.status != expected:
+    sys.exit(f"BFF {step}: expected HTTP {expected}, got {response.status}")
+cookies = SimpleCookie()
+for name, value in response.getheaders():
+    if name.lower() == "set-cookie":
+        cookies.load(value)
+for name in ("threshold_session", "threshold_refresh"):
+    cookie = cookies.get(name)
+    if not cookie or not (cookie.value and cookie["httponly"] and cookie["secure"]):
+        sys.exit(f"BFF {step}: missing secure HttpOnly {name} cookie")
+user = json.load(response)["user"]
+if user["username"] != username or not user["id"]:
+    sys.exit(f"BFF {step}: missing synthetic user")
+print(user["id"])
+PY
 }
 
 stopped() {
@@ -44,14 +84,16 @@ pid=$(main_pid)
 group=$(stack_group)
 [[ $pid != 0 && -n $group && -r /sys/fs/cgroup$group/cgroup.procs ]]
 [[ $(stat -c '%a' "$state") == 700 && $(stat -c '%a' "$state/pg-password") == 600 ]]
-"${psql[@]}" -c "COMMENT ON DATABASE perlimen_lite IS 'lite lifecycle smoke';"
+registered=$(auth register)
+logged_in=$(auth login)
+[[ $logged_in == "$registered" ]]
 go-task lite:start
 [[ $(main_pid) == "$pid" ]]
 stopped "$group"
 
 go-task lite:start
 ready
-[[ $("${psql[@]}" -c "SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = current_database();") == 'lite lifecycle smoke' ]]
-"${psql[@]}" -c 'COMMENT ON DATABASE perlimen_lite IS NULL;'
+logged_in=$(auth login)
+[[ $logged_in == "$registered" ]]
 stopped "$(stack_group)"
-printf 'Lite lifecycle smoke passed (loopback, readiness, restart persistence, and clean stop).\n'
+printf 'Lite lifecycle smoke passed (loopback, readiness, BFF register/login, account persistence, and clean stop).\n'

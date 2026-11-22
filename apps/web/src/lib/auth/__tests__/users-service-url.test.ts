@@ -20,4 +20,19 @@ describe("users service URL config", () => {
       "http://users.example.test",
     )
   })
+
+  it("pins Lite to the exact loopback users endpoint on the launcher port", () => {
+    const base = "http://127.0.0.1:3800/users"
+    expect(resolveUsersServiceUrl(`${base}/`, "3800")).toBe(base)
+    for (const other of [
+      "http://users.example.test:3800/users",
+      "http://127.0.0.1:3801/users",
+      "http://127.0.0.1:3800@users.example.test/users",
+      "http://127.0.0.1:3800/social",
+      `${base}?other=true`,
+    ]) {
+      expect(() => resolveUsersServiceUrl(other, "3800")).toThrow(UsersServiceConfigurationError)
+    }
+    expect(() => resolveUsersServiceUrl(base, "")).toThrow(UsersServiceConfigurationError)
+  })
 })

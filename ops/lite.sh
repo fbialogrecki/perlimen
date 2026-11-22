@@ -139,6 +139,7 @@ await API "$api_pid" 45 "${http[@]}" "$api_url/readyz"
     cd apps/web
     export USERS_SERVICE_URL="$api_url/users" SOCIAL_SERVICE_URL="$api_url/social"
     export EVENTS_SERVICE_URL="$api_url/events" MEDIA_SERVICE_URL="$api_url/media"
+    export PERLIMEN_LITE_API_PORT="$api_port"
     export NODE_ENV=development NEXT_TELEMETRY_DISABLED=1 AUTH_COOKIE_SECURE=true WEB_TRUSTED_LAN_HTTP=false
     exec bun ./node_modules/next/dist/bin/next dev --hostname "$host" --port "$web_port"
 ) &

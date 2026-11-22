@@ -3,7 +3,7 @@ import "server-only"
 import { cookies } from "next/headers"
 
 import { REFRESH_COOKIE, SESSION_COOKIE } from "@/lib/auth/cookies"
-import { resolveUsersServiceUrl } from "@/lib/auth/users-service-url"
+import { resolveUsersServiceUrl, UsersServiceConfigurationError } from "@/lib/auth/users-service-url"
 import type { NotificationPreferences } from "@/lib/notification-preferences"
 
 /**
@@ -18,10 +18,6 @@ export type UsersResponse = {
   body: unknown
   /** Raw Set-Cookie headers from `users`, to be bridged onto the browser. */
   setCookies: string[]
-}
-
-function baseUrl(): string {
-  return resolveUsersServiceUrl(USERS_SERVICE_URL)
 }
 
 /** Forward only the opaque auth cookies, never unrelated browser cookies. */
@@ -42,7 +38,14 @@ async function call(
     method: "GET",
   },
 ): Promise<UsersResponse> {
+  const litePort = process.env.PERLIMEN_LITE_API_PORT
+  const base = resolveUsersServiceUrl(USERS_SERVICE_URL, litePort)
   const headers = new Headers({ accept: "application/json" })
+  if (litePort !== undefined) {
+    const token = process.env.THRESHOLD_INTERNAL_TOKEN
+    if (!token) throw new UsersServiceConfigurationError("Lite users service token is not configured")
+    headers.set("X-Threshold-Internal-Token", token)
+  }
   let requestBody: string | undefined
 
   if (init.json !== undefined) {
@@ -54,11 +57,12 @@ async function call(
     if (cookieHeader) headers.set("cookie", cookieHeader)
   }
 
-  const response = await fetch(`${baseUrl()}${path}`, {
+  const response = await fetch(`${base}${path}`, {
     method: init.method,
     headers,
     body: requestBody,
     cache: "no-store",
+    redirect: litePort === undefined ? undefined : "error",
   })
 
   const setCookies = response.headers.getSetCookie?.() ?? []

@@ -42,10 +42,15 @@ Podman store and PostgreSQL volume, local media directory and generated dev-only
 secrets. Keep the entire directory together: deleting a credential is not a
 rotation. No `.env` files are needed; the launcher refuses web dotenv files it
 would otherwise load and does not inherit legacy service configuration. It does
-not enable remote email, telemetry or object storage. `/readyz` plus the landing
-page verifies startup, not authenticated browser flows or media uploads.
+not enable remote email, telemetry or object storage. The launcher sets
+`PERLIMEN_LITE_API_PORT` for the BFF so product-auth requests send the internal
+token only to `http://127.0.0.1:<port>/users` and never follow redirects. The
+standalone users service does not use this mode.
 
 On a **fresh disposable checkout** containing both changes, run
-`bash ops/tests/lite-smoke.sh --disposable` to verify binding, startup, repeated
-start, a PostgreSQL marker surviving stop/start, and listener/cgroup cleanup.
-This leaves the checkout's isolated test volume stopped, not deleted.
+`bash ops/tests/lite-smoke.sh --disposable` (requires `python3`). It checks
+loopback binding, Next.js and API readiness, and synthetic registration and
+login through Next.js. A second start preserves the running PID, and login
+returns the same account after stop/start. The test checks listener/cgroup
+cleanup and leaves the isolated volume stopped, not deleted. It does not test
+browser cookie handling, refresh rotation or media uploads.

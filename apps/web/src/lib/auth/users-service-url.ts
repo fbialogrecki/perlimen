@@ -5,9 +5,19 @@ export class UsersServiceConfigurationError extends Error {
   }
 }
 
-export function resolveUsersServiceUrl(value: string | undefined): string {
+export function resolveUsersServiceUrl(value: string | undefined, litePort?: string): string {
   if (!value?.trim()) {
     throw new UsersServiceConfigurationError()
   }
-  return value.replace(/\/$/, "")
+  const base = value.replace(/\/$/, "")
+  if (litePort !== undefined) {
+    const port = Number(litePort)
+    if (
+      !Number.isInteger(port) || port < 1024 || port > 65535 ||
+      String(port) !== litePort || base !== `http://127.0.0.1:${port}/users`
+    ) {
+      throw new UsersServiceConfigurationError("Lite users service must use its configured loopback endpoint")
+    }
+  }
+  return base
 }
