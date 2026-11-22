@@ -193,3 +193,8 @@ The approved public path is Cloudflare HTTPS → `cloudflared` → `http://web.t
 ## Deployment
 
 Application pushes to `main` publish images automatically and promote their digests into `infra/` through an auto-merging pull request; Argo CD syncs after the merge. Database migrations run as Argo CD `Sync` hook Jobs. See `docs/release-and-deploy.md`.
+
+The opt-in [Lite timer](runbooks/perlimen-lite.md#automatic-lite-deployment-dedicated-nuc-account)
+is separate from Argo CD. A trusted user service trials the CI-green `main` tip in an independent
+checkout and a private runtime network namespace. Only Web, API and PostgreSQL are forwarded to
+host loopback. Promotion rechecks remote `main`; recovery keeps the same private synthetic store.

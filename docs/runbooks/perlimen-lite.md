@@ -137,6 +137,12 @@ Woodpecker, Harbor or Argo CD. Intermediate pushes can be superseded.
 - Reserve **13300 (Web), 13800 (API), 15432 (PostgreSQL)** on loopback. Verify all
   three are free before first start. Use only synthetic data. Do not reuse any
   existing checkout, credentials, database or media directories.
+- The automatic target requires rootless Linux user/network namespaces,
+  `unshare`, `nsenter`, and `pasta` with `--host-lo-to-ns-lo` support. The
+  installed controller creates a new network namespace before the checkout's
+  install or launch commands run. Only the three TCP ports are forwarded to
+  host IPv4 loopback; automatic forwards are disabled. Startup fails without
+  this boundary. The network namespace is not a sandbox for untrusted code.
 - Stage the following four files from a reviewed, successfully checked **merged
   main** revision. Run these commands as the dedicated account from the staged
   tree. Install trusted control files outside the managed checkout and update
@@ -153,13 +159,14 @@ journalctl --user -u perlimen-lite-pull.service -e
 ```
 
 On first eligible poll the controller creates a checkout and fresh Lite store.
-Subsequent polls retain the same checkout path (and therefore the same private
-PostgreSQL/media store). No two polls or rollbacks run concurrently. The
-controller records current/previous SHA and CI run, attempt and job IDs in
-`release.json` under the private `perlimen-lite-pull` state directory. It records
-success only after checking loopback listener PIDs and cgroup, the running
-checkout SHA, Web `/` and API `/readyz`. Synthetic BFF login is a separate
-operator acceptance check, not part of each poll.
+Each candidate gets a separate checkout; the recorded current and previous
+checkouts remain available for recovery. The service keeps the same private
+PostgreSQL/media store across switches. No two polls or rollbacks run concurrently.
+`release.json` records current/previous checkout, SHA and CI evidence. After
+checking the namespace, listener PIDs, running checkout, Web `/` and API `/readyz`,
+the controller reads remote `main` again before promoting. A changed or unreadable
+tip restores the last healthy release (or stops the first trial) without rejecting
+the candidate SHA. Synthetic BFF login is a separate operator acceptance check.
 
 ### Verify, roll back and stop
 
@@ -178,8 +185,9 @@ holds automatic promotion **before** the switch. `status` must report that SHA
 in both the record and the live check; verify the same synthetic account still
 works. On first deployment there is no previous SHA. If a candidate fails health
 or is interrupted, the prior committed release remains authoritative; the next
-poll restores it if necessary without consulting GitHub, and does not retry the
-failed SHA. Recovery still needs the installed toolchain, dependency cache and
+poll restores it if necessary without consulting GitHub. A confirmed activation
+failure blocks that SHA; an interrupted trial or unreadable tip can be retried.
+Recovery still needs the installed toolchain, dependency cache and
 local PostgreSQL image (or access to download missing artifacts).
 A rollback hold survives restarts; it still lets the timer restore the held
 release. After triage, lift the hold with:
@@ -199,8 +207,10 @@ systemctl --user stop perlimen-lite-pull.service
 python3 -I "$ctl" --state "$state" stop
 ```
 
-The stop keeps both the release record and the checkout-specific Lite data and
-credentials. Do not edit the checkout or release record in place. There is
+The stop keeps the release record, checkouts, and target-specific Lite data and
+credentials. The controller never resets or deletes an inactive checkout. After
+stopping the target, inspect inactive worktrees under `releases/` before pruning
+them; retain the current and previous worktrees from `release.json`. There is
 brief downtime during a switch; this is a single loopback target, not a
 production Next build, sandbox for untrusted code, or high-availability service.
 Migration/schema inputs, launcher and lock/dependency inputs must match the

@@ -5,20 +5,23 @@ import hashlib
 import json
 import os
 import re
-import shutil
+import signal
 import subprocess
 import sys
-from contextlib import closing
+from contextlib import closing, suppress
 from fcntl import LOCK_EX, LOCK_NB, flock
 from http.client import HTTPConnection, HTTPException
 from pathlib import Path
-from tempfile import NamedTemporaryFile
+from select import select
+from tempfile import NamedTemporaryFile, mkdtemp
+from time import monotonic, sleep
 from typing import TypedDict
 
 REMOTE = "https://github.com/fbialogrecki/perlimen.git"
 MAIN = "refs/heads/main"
 INTAKE = "refs/heads/lite-intake-main"
 VERIFIER = Path(__file__).resolve().with_name("verify_main_ci.py")
+CONTROLLER = Path(__file__).resolve()
 PORTS = (13300, 13800, 15432)  # Web, API, PostgreSQL
 RECOVERY_ERRORS = (OSError, subprocess.SubprocessError, RuntimeError, HTTPException)
 # Compare trees (without rename detection), not commit messages or migration numbers.
@@ -41,9 +44,13 @@ class Release(TypedDict):
     ci: str
 
 
+class Deployment(Release):
+    checkout: str
+
+
 class State(TypedDict):
-    current: Release | None
-    previous: Release | None
+    current: Deployment | None
+    previous: Deployment | None
     blocked: str | None
     held: bool
 
@@ -58,14 +65,148 @@ def valid_sha(sha: str) -> str:
     return sha
 
 
+def isolated_runtime(ports: tuple[int, ...], command: list[str]) -> int:
+    """Start no release code until a fresh rootless namespace has explicit forwards."""
+    require(os.geteuid() != 0, "Use the dedicated rootless account")
+    require(len(ports) == len(set(ports)) == 3, "Expected three distinct ports")
+    require(all(1024 <= port <= 65535 for port in ports), "Invalid runtime port")
+    state = Path(os.environ["STATE_DIRECTORY"])
+    runtime = Path(os.environ["RUNTIME_DIRECTORY"])
+    namespaces = ["--net"]
+    dns_options = []
+    resolver = Path("/etc/resolv.conf").resolve()
+    if resolver == Path("/run/systemd/resolve/stub-resolv.conf"):
+        # The host's loopback resolver is not on the namespace's loopback.
+        guest_dns = "192.0.2.53"
+        conf = runtime / "resolv.conf"
+        conf.write_text(
+            resolver.read_text().replace("nameserver 127.0.0.53", f"nameserver {guest_dns}")
+        )
+        namespaces += ["--mount"]
+        dns_options = ["--dns-forward", guest_dns, "--dns-host", "127.0.0.53"]
+        command = [
+            "bash",
+            "-p",
+            "-ec",
+            'mount --bind "$1" "$2"; shift 2; exec "$@"',
+            "lite-resolver",
+            str(conf),
+            str(resolver),
+            *command,
+        ]
+
+    def listeners(port: int) -> list[str]:
+        return subprocess.check_output(
+            ["ss", "-H", "-ltn", f"sport = :{port}"], text=True, timeout=5
+        ).splitlines()
+
+    for port in ports:
+        require(not listeners(port), f"Host port {port} is occupied")
+    with subprocess.Popen(
+        [
+            "podman",
+            "--remote=false",
+            "--root",
+            str(state / "containers"),
+            "--runroot",
+            str(runtime / "containers"),
+            "unshare",
+            "unshare",
+            *namespaces,
+            "bash",
+            "-p",
+            "-c",
+            'echo "$$"; read -r go && [[ $go == go ]] || exit 1; exec 1>&2; exec "$@"',
+            "lite-netns",
+            *command,
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    ) as inner:
+        assert inner.stdin is not None and inner.stdout is not None
+        proxy = None
+        pid = None
+        stop = False
+
+        def stopping(_signum: int, _frame: object) -> None:
+            nonlocal stop
+            stop = True
+
+        handler = signal.signal(signal.SIGTERM, stopping)
+        try:
+            require(select([inner.stdout], [], [], 10)[0], "No private namespace from Podman")
+            raw_pid = inner.stdout.readline().strip()
+            require(raw_pid.isascii() and raw_pid.isdecimal(), "No private namespace PID")
+            namespace = Path(f"/proc/{raw_pid}/ns/net").readlink()
+            require(namespace != Path("/proc/self/ns/net").readlink(), "No network isolation")
+            pid = int(raw_pid)
+            forward = "127.0.0.1/" + ",".join(map(str, ports))
+            proxy = subprocess.Popen(
+                [
+                    "pasta",
+                    "--quiet",
+                    "--foreground",
+                    "--config-net",
+                    "--host-lo-to-ns-lo",
+                    "--no-map-gw",
+                    *dns_options,
+                    "-t",
+                    forward,
+                    "-u",
+                    "none",
+                    "-T",
+                    "none",
+                    "-U",
+                    "none",
+                    raw_pid,
+                ]
+            )
+            deadline = monotonic() + 10
+            while True:
+                require(
+                    not stop and proxy.poll() is None and inner.poll() is None,
+                    "Loopback isolation failed to start",
+                )
+                if all(
+                    [row.split()[3] for row in listeners(p)] == [f"127.0.0.1:{p}"] for p in ports
+                ):
+                    break
+                require(monotonic() < deadline, "Loopback forwards did not become available")
+                sleep(0.1)
+            (runtime / "namespace-pid").write_text(raw_pid)
+            inner.stdin.write("go\n")
+            inner.stdin.close()
+            while inner.poll() is None and not stop:
+                require(proxy.poll() is None, "Loopback proxy exited")
+                sleep(0.2)
+            return 0 if stop else inner.wait()
+        finally:
+            inner.stdin.close()
+            try:
+                if inner.poll() is None and pid is not None:
+                    with suppress(ProcessLookupError):
+                        os.kill(pid, signal.SIGTERM)
+                try:
+                    inner.wait(timeout=20)
+                except subprocess.TimeoutExpired:
+                    inner.kill()
+            finally:
+                if proxy is not None and proxy.poll() is None:
+                    proxy.terminate()
+                    proxy.wait(timeout=3)
+                signal.signal(signal.SIGTERM, handler)
+
+
 class Target:
     def __init__(self, directory: Path, ports: tuple[int, int, int] = PORTS) -> None:
         self.directory = directory.resolve()
-        self.checkout = self.directory / "checkout"
+        self.intake = self.directory / "intake.git"
+        self.releases = self.directory / "releases"
         self.record = self.directory / "release.json"
-        self.unit = (
-            f"perlimen-lite-{hashlib.sha256(os.fsencode(self.checkout)).hexdigest()[:16]}.service"
-        )
+        key = hashlib.sha256(os.fsencode(self.directory / "checkout")).hexdigest()[:16]
+        self.instance = f"perlimen-lite-{key}"
+        self.unit = f"{self.instance}.service"
         self.ports = ports
         home = Path.home()
         self.env = {
@@ -86,7 +227,7 @@ class Target:
             args, cwd=cwd or self.directory, timeout=timeout, env=self.env, text=True
         ).strip()
 
-    def git(self, *args: str, timeout: int = 30) -> str:
+    def git(self, *args: str, cwd: Path | None = None, timeout: int = 30) -> str:
         return self.run(
             "git",
             "-c",
@@ -94,7 +235,7 @@ class Target:
             "-c",
             "credential.helper=",
             *args,
-            cwd=self.checkout,
+            cwd=cwd or self.intake,
             timeout=timeout,
         )
 
@@ -104,7 +245,7 @@ class Target:
         state: State = json.loads(self.record.read_text())
         for release in (state["current"], state["previous"]):
             if release is not None:
-                valid_sha(release["sha"])
+                self.checkout(release)
         if state["blocked"] is not None:
             valid_sha(state["blocked"])
         require(type(state["held"]) is bool, "Invalid hold in release record")
@@ -129,11 +270,9 @@ class Target:
                 tmp.unlink(missing_ok=True)
 
     def tip(self) -> str:
-        if not self.checkout.exists():
-            self.checkout.mkdir(mode=0o700)
-        if not (self.checkout / ".git").is_dir():
-            require(not any(self.checkout.iterdir()), "Refusing to adopt an existing checkout")
-            self.git("init", "--quiet", "--template=")
+        if not self.intake.exists():
+            self.intake.mkdir(mode=0o700)
+            self.git("init", "--bare", "--quiet", "--template=")
         # A local branch ref rejects non-fast-forward fetches. Never force-update it.
         self.git(
             "fetch",
@@ -146,12 +285,17 @@ class Target:
         )
         return valid_sha(self.git("rev-parse", INTAKE))
 
+    def main_matches(self, sha: str) -> bool:
+        observed = self.git("ls-remote", "--exit-code", REMOTE, MAIN)
+        tip, _, ref = observed.partition("\t")
+        require(ref == MAIN, "Unexpected remote main response")
+        return valid_sha(tip) == sha
+
     def eligible(self, sha: str) -> Release:
         ci = subprocess.check_output(
             [sys.executable, "-I", str(VERIFIER), sha], env={}, text=True, timeout=30
         ).strip()
-        observed = self.git("ls-remote", "--exit-code", REMOTE, MAIN)
-        require(observed == f"{sha}\t{MAIN}", "main moved during CI verification; retry next poll")
+        require(self.main_matches(sha), "main moved during CI verification; retry next poll")
         return {"sha": sha, "ci": ci}
 
     def compatible(self, a: str, b: str) -> None:
@@ -169,18 +313,56 @@ class Target:
         if self.show("LoadState") != "not-found":
             self.run("systemctl", "--user", "stop", self.unit, timeout=40)
 
-    def live(self, release: Release, phase: str) -> None:
+    def checkout(self, release: Deployment) -> Path:
+        sha = valid_sha(release["sha"])
+        name = release["checkout"]
+        require(re.fullmatch(rf"{sha}-[a-z0-9_]+", name), "Invalid release checkout name")
+        path = self.releases / name
+        require(not path.is_symlink(), "Release checkout cannot be a symlink")
+        return path
+
+    def prepare(self, release: Release) -> Deployment:
+        self.releases.mkdir(mode=0o700, exist_ok=True)
+        sha = valid_sha(release["sha"])
+        checkout = Path(mkdtemp(prefix=f"{sha}-", dir=self.releases))
+        self.git("worktree", "add", "--quiet", "--detach", str(checkout), sha)
+        return {"sha": sha, "ci": release["ci"], "checkout": checkout.name}
+
+    def clean(self, release: Deployment) -> Path:
+        checkout = self.checkout(release)
+        head = self.git("rev-parse", "HEAD", cwd=checkout)
+        require(head == release["sha"], "Checkout SHA mismatch")
+        status = self.git("status", "--porcelain", "-uno", cwd=checkout)
+        require(not status, "Checkout has tracked edits")
+        return checkout
+
+    def live(self, release: Deployment, phase: str) -> None:
         group = self.show("ControlGroup")
         require(
             self.show("ActiveState") == "active" and group.startswith("/"), "Lite is not active"
         )
         members = Path(f"/sys/fs/cgroup{group}/cgroup.procs").read_text().split()
-        sha = release["sha"]
-        require(self.git("rev-parse", "HEAD") == sha, "Runtime checkout SHA mismatch")
-        require(not self.git("status", "--porcelain", "-uno"), "Runtime checkout has tracked edits")
+        checkout = self.clean(release)
+        runtime = Path(self.env["XDG_RUNTIME_DIR"]) / self.instance
+        pid = (runtime / "namespace-pid").read_text().strip()
+        require(pid in members, "Lite namespace does not belong to the running unit")
+        require(
+            Path(f"/proc/{pid}/ns/net").readlink() != Path("/proc/self/ns/net").readlink(),
+            "Lite shares the host network namespace",
+        )
         pids = []
         for port in self.ports:
-            rows = self.run("ss", "-H", "-ltnp", f"sport = :{port}").splitlines()
+            rows = self.run(
+                "nsenter",
+                "--target",
+                pid,
+                "--user",
+                "--net",
+                "ss",
+                "-H",
+                "-ltnp",
+                f"sport = :{port}",
+            ).splitlines()
             require(
                 len(rows) == 1 and rows[0].split()[3] == f"127.0.0.1:{port}",
                 f"Expected one loopback listener on {port}",
@@ -189,7 +371,7 @@ class Target:
             if match is None or match[1] not in members:
                 raise RuntimeError(f"Listener on {port} does not belong to {self.unit}")
             pids.append(match[1])
-        for pid, cwd in zip(pids[:2], (self.checkout / "apps/web", self.checkout), strict=True):
+        for pid, cwd in zip(pids[:2], (checkout / "apps/web", checkout), strict=True):
             require(
                 Path(f"/proc/{pid}/cwd").resolve(strict=True) == cwd, "Listener checkout mismatch"
             )
@@ -203,25 +385,36 @@ class Target:
                 flush=True,
             )
 
-    def activate(self, release: Release, phase: str) -> None:
+    def activate(self, release: Deployment, phase: str) -> None:
+        checkout = self.clean(release)
         self.stop()
-        require(not self.git("status", "--porcelain", "-uno"), "Release checkout has tracked edits")
-        self.git("switch", "--quiet", "--detach", valid_sha(release["sha"]))
-        web = self.checkout / "apps/web"
-        build = web / ".next"
-        if build.exists():
-            shutil.rmtree(build)
-        self.run("bun", "install", "--frozen-lockfile", "--ignore-scripts", cwd=web, timeout=180)
-        ports = [
-            f"PERLIMEN_LITE_{part}_PORT={port}"
-            for part, port in zip(("WEB", "API", "PG"), self.ports, strict=True)
-        ]
         self.run(
-            "env", *ports, "bash", "-p", "ops/lite.sh", "start", cwd=self.checkout, timeout=255
+            "systemd-run",
+            "--user",
+            f"--unit={self.unit}",
+            "--collect",
+            "--service-type=notify",
+            "--property=NotifyAccess=all",
+            "--property=KillMode=mixed",
+            "--property=TimeoutStartSec=420",
+            "--property=TimeoutStopSec=25",
+            f"--property=StateDirectory={self.instance}",
+            "--property=StateDirectoryMode=0700",
+            f"--property=RuntimeDirectory={self.instance}",
+            "--property=RuntimeDirectoryMode=0700",
+            f"--setenv=PATH={self.env['PATH']}",
+            "--expand-environment=no",
+            sys.executable,
+            "-I",
+            str(CONTROLLER),
+            "isolated-runtime",
+            str(checkout),
+            *map(str, self.ports),
+            timeout=435,
         )
         self.live(release, phase)
 
-    def recover(self, current: Release | None) -> None:
+    def recover(self, current: Deployment | None) -> None:
         if current is None:
             self.stop()  # Interrupted first rollout: no known-good revision yet.
             return
@@ -234,18 +427,30 @@ class Target:
                 self.stop()
                 raise
 
-    def replace(self, state: State, release: Release, *, rollback: bool = False) -> None:
+    def replace(self, state: State, release: Deployment, *, rollback: bool = False) -> None:
         current = state["current"]
         if rollback:
             state["held"] = True  # Persist the hold before stopping the active release.
-        else:
-            state["blocked"] = release["sha"]  # Also records an interrupted promotion.
-        self.save(state)
+            self.save(state)
         try:
             self.activate(release, "rollback verified" if rollback else "candidate verified")
         except RECOVERY_ERRORS:
+            if not rollback:
+                state["blocked"] = release["sha"]
+                self.save(state)
             self.recover(current)
             raise
+        if not rollback:
+            # A failed remote read is not a candidate failure either. Leave it retriable.
+            try:
+                still_tip = self.main_matches(release["sha"])
+            except RECOVERY_ERRORS:
+                self.recover(current)
+                raise
+            if not still_tip:
+                self.recover(current)
+                print("main moved during readiness; retry next poll", flush=True)
+                return
         state["current"], state["previous"] = release, current
         if not rollback:
             state["blocked"] = None
@@ -255,6 +460,7 @@ class Target:
     def poll(self, state: State) -> None:
         current = state["current"]
         self.recover(current)  # Even offline or on hold, restart only the known-good SHA.
+
         if state["held"]:
             return
         sha = self.tip()
@@ -264,7 +470,7 @@ class Target:
         if baseline:
             self.git("merge-base", "--is-ancestor", baseline, sha)
             self.compatible(baseline, sha)
-        self.replace(state, self.eligible(sha))
+        self.replace(state, self.prepare(self.eligible(sha)))
 
     def rollback(self, state: State) -> None:
         current, previous = state["current"], state["previous"]
@@ -275,6 +481,22 @@ class Target:
 
 
 def main() -> int:
+    if sys.argv[1:2] == ["isolated-runtime"]:
+        checkout, *ports = sys.argv[2:]
+        return isolated_runtime(
+            tuple(map(int, ports)),
+            [
+                "bash",
+                "-p",
+                "-c",
+                'set -e; cd -- "$1/apps/web"; shift; '
+                "bun install --frozen-lockfile --ignore-scripts; cd ../..; "
+                'exec bash -p ops/lite.sh run "$@" "" isolated',
+                "lite-launch",
+                checkout,
+                *ports,
+            ],
+        )
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--state", type=Path, required=True, help="Private dedicated target directory"
@@ -294,7 +516,8 @@ def main() -> int:
             info.st_uid == os.getuid() and not info.st_mode & 0o077,
             "Target directory must be owned by this user and private",
         )
-        require(not target.checkout.is_symlink(), "Target checkout cannot be a symlink")
+        require(not target.intake.is_symlink(), "Intake cannot be a symlink")
+        require(not target.releases.is_symlink(), "Release directory cannot be a symlink")
         with (target.directory / "lock").open("a") as lock:
             flock(lock, LOCK_EX | LOCK_NB)
             state = target.load()
