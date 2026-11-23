@@ -232,7 +232,14 @@ failure blocks that SHA; an interrupted trial or a failed remote recheck can be 
 Recovery still needs the installed toolchain, dependency cache and
 local PostgreSQL image (or access to download missing artifacts).
 A rollback hold survives restarts; it still lets the timer restore the held
-release. After triage, lift the hold with:
+release. To verify the hold, leave the timer active. After rollback, note its
+`LastTriggerUSec` (`systemctl --user show perlimen-lite-pull.timer -p LastTriggerUSec`).
+Wait for a later trigger and for that poll service to finish successfully. Run
+`status` again: `held` must still be true, the live SHA must still be the restored
+one, and a fresh login must identify the same synthetic account. Do not use
+`resume` or a manual poll as a substitute for observing that timer cycle.
+
+After triage, lift the hold with:
 
 ```bash
 python3 -I "$ctl" --state "$state" resume
