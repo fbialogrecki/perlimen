@@ -175,6 +175,15 @@ unchanged.
   the namespaces and loopback forwards. It forwards only the three TCP ports
   to host IPv4 loopback. Startup fails without this boundary; the network
   namespace is not a sandbox for untrusted code.
+- The installed controller sets PostgreSQL's HBA file at startup, outside the
+  data volume. It requires SCRAM-SHA-256 on loopback TCP on first boot and on
+  existing volumes. The image still initializes a fresh database over its
+  private Unix socket; the controller neither edits the volume's HBA file nor
+  changes any stored passwords. A store without valid SCRAM credentials fails
+  readiness; do not reset credentials or replace the store to retry a trial.
+  If troubleshooting an older controller, update the installed control files
+  as described below. Updating the candidate checkout alone does not apply
+  this policy. Leave the blocked SHA intact and wait for a new eligible tip.
 - Stage the following four files from a reviewed, successfully checked **merged
   main** revision. Run these commands as the dedicated account from the staged
   tree. Install trusted control files outside the managed checkout and update

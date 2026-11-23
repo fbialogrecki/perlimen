@@ -80,6 +80,14 @@ def isolated_runtime(ports: tuple[int, ...], command: list[str]) -> int:
     podman_runtime.mkdir(mode=0o700)
     config = podman_runtime / "containers.conf"
     config.write_text('[engine]\nlock_type = "file"\n')
+    # Use the same policy for new and existing volumes without editing PGDATA.
+    hba = podman_runtime / "pg_hba.conf"
+    hba.write_text(
+        "local all lite_bootstrap scram-sha-256\n"
+        "host all all 127.0.0.1/32 scram-sha-256\n"
+    )
+    hba.chmod(0o644)  # Readable by the mapped postgres user, under a private host directory.
+    pg_options = quote(f"{hba}:/run/lite-pg_hba.conf:ro,Z")
     # The checkout launcher scrubs the environment. Restore the mapped host IDs
     # and private Podman settings at the CLI boundary, even for old checkouts.
     cli = podman_runtime / "podman"
@@ -88,6 +96,14 @@ def isolated_runtime(ports: tuple[int, ...], command: list[str]) -> int:
         f"export _CONTAINERS_ROOTLESS_UID={os.geteuid()} _CONTAINERS_ROOTLESS_GID={os.getegid()}\n"
         f"export XDG_RUNTIME_DIR={quote(str(podman_runtime))} "
         f"CONTAINERS_CONF_OVERRIDE={quote(str(config))}\n"
+        # Keep ops/lite.sh byte-compatible with releases already recorded by the timer.
+        'if [ "${6:-}" = run ]; then\n'
+        '    [ "${7:-}" = --rm ] && [ "${8:-}" = --name ] && [ "${9:-}" = postgres ] || exit 1\n'
+        '    root=$3 runroot=$5\n'
+        '    shift 6\n'
+        f'    set -- --remote=false --root "$root" --runroot "$runroot" run --volume {pg_options} '
+        '"$@" -c hba_file=/run/lite-pg_hba.conf\n'
+        "fi\n"
         f"exec {quote(os.path.abspath(podman))} "
         f"--tmpdir {quote(str(podman_runtime / 'tmp'))} \"$@\"\n"
     )
