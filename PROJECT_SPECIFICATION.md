@@ -5,7 +5,7 @@
 | **Status** | Accepted — describes shipped behavior |
 | **Version** | 1.2.0 |
 | **Owner** | Engineering |
-| **Last updated** | 2026-11-22 |
+| **Last updated** | 2026-11-23 |
 | **Verified against** | `apps/web/src/`, `apps/web/package.json`, `services/*/src/`, `libs/py/perlimen_common/`, `perlimen_lite/`, `infra/argocd/`, `infra/kustomize/`, `.github/workflows/ci.yml`, `.woodpecker/`, `Taskfile.yml`, `pyproject.toml` |
 
 ## Purpose of this file
@@ -58,22 +58,22 @@ Keep this map correct: line ranges shift whenever content is added or removed.
 | 6.1 | Runtime | 352-378 |
 | 6.2 | Service-to-service transports | 379-392 |
 | 6.3 | Build, publication and deployment | 393-405 |
-| **7** | **Security** — touching auth, trust boundaries, secrets or headers | 406-425 |
-| **8** | **Privacy and data retention** — touching personal data, deletion or backups | 426-439 |
-| **9** | **Data model** — changing tables or migrations | 440-476 |
-| 9.1 | users | 445-455 |
-| 9.2 | social | 456-461 |
-| 9.3 | events | 462-469 |
-| 9.4 | media | 470-476 |
-| **10** | **API contract** — adding or changing an endpoint | 477-561 |
-| 10.1 | Conventions | 479-484 |
-| 10.2 | users | 485-507 |
-| 10.3 | social | 508-521 |
-| 10.4 | events | 522-537 |
-| 10.5 | media and auth-gateway | 538-548 |
-| 10.6 | Web BFF | 549-561 |
-| **11** | **Test plan** — you need test locations, gates or CI jobs | 562-577 |
-| **12** | **References** — you need operational detail kept out of this file | 578-587 |
+| **7** | **Security** — touching auth, trust boundaries, secrets or headers | 406-427 |
+| **8** | **Privacy and data retention** — touching personal data, deletion or backups | 428-441 |
+| **9** | **Data model** — changing tables or migrations | 442-478 |
+| 9.1 | users | 447-457 |
+| 9.2 | social | 458-463 |
+| 9.3 | events | 464-471 |
+| 9.4 | media | 472-478 |
+| **10** | **API contract** — adding or changing an endpoint | 479-563 |
+| 10.1 | Conventions | 481-486 |
+| 10.2 | users | 487-509 |
+| 10.3 | social | 510-523 |
+| 10.4 | events | 524-539 |
+| 10.5 | media and auth-gateway | 540-550 |
+| 10.6 | Web BFF | 551-563 |
+| **11** | **Test plan** — you need test locations, gates or CI jobs | 564-579 |
+| **12** | **References** — you need operational detail kept out of this file | 580-589 |
 
 ---
 
@@ -406,6 +406,8 @@ the BFF also sends the internal token to the pinned loopback `/users` endpoint w
 ## 7. Security
 
 - Browsers never hold internal tokens, S3 credentials, bucket names or raw object keys.
+- For automatic Lite deployments, PostgreSQL reads its HBA file from outside the data volume.
+  It requires SCRAM-SHA-256 on IPv4 loopback TCP and for `lite_bootstrap` on its Unix socket.
 - `social`, `events` and `media` require `X-Threshold-Internal-Token` on every route
   (constant-time compare; 503 when unconfigured) and trust user headers only after it.
   Standalone `users` requires it on `/internal/v1/*`; Lite also requires it on `/users/v1/*`.
